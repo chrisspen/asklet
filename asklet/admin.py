@@ -173,6 +173,7 @@ class SessionAdmin(admin.ModelAdmin):
         'user_uuid',
         'winner',
         'target',
+        'questions_count',
         'merged',
         'created',
     )
@@ -186,6 +187,10 @@ class SessionAdmin(admin.ModelAdmin):
         'domain',
         'user',
         'target',
+    )
+    
+    readonly_fields = (
+        'questions_count',
     )
     
     inlines = (

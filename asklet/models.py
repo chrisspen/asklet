@@ -210,6 +210,10 @@ class Session(models.Model):
     
     created = models.DateTimeField(auto_now_add=True)
     
+    def questions_count(self):
+        return self.answers.all().count()
+    questions_count.short_description = 'questions'
+    
     def __unicode__(self):
         return u('user %s in domain %s' % (self.user or self.user_uuid, self.domain))
     
@@ -239,8 +243,9 @@ class Session(models.Model):
                 print(answer.question.slug, answer.answer)
             print('')
         
+#        print('answers:',answers)
         top_targets = self.domain.rank_targets(
-            answers=dict((answer.question.slug, answer.answer) for answer in answers),
+            answers=dict((answer.question.slug, answer.answer) for answer in answers if answer.question),
             prior_failed_target_ids=prior_failed_target_ids,
             prior_top_target_ids=prior_top_target_ids,
         )
@@ -255,8 +260,10 @@ class Session(models.Model):
             print('%i top targets' % len(top_targets))
             for target,rank in top_targets:
                 print('top target:', rank, target)
-            
-        if len(top_targets) == 1:
+        
+        if not top_targets:
+            return
+        elif len(top_targets) == 1:
             return top_targets[0][0]
         elif answers.count()+1 == self.domain.max_questions:
             # We only have one more question left, so make our best guess.
@@ -531,9 +538,14 @@ class Answer(models.Model):
         )
     
     def __str__(self):
-        return u(str(self.answer))
+        if self.question:
+            return 'question: %s %s' % (self.question.slug, self.answer)
+        elif self.guess:
+            return 'guess: %s %s' % (self.guess.slug, self.answer)
     
     def save(self, *args, **kwargs):
+        if not self.question and not self.guess:
+            raise Exception('Either a question or guess must be specified.')
         if not self.id:
             if self.question and not self.question_text:
                 self.question_text = self.question.slug
