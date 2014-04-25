@@ -5,24 +5,26 @@ from setuptools import setup, find_packages, Command
 
 import asklet
 
-def get_reqs():
+def get_reqs(testing=False):
     reqs = [
         'Django>=1.4.0',
         'six>=1.6.1',
         # Note, you may need to do:
-        # sudo apt-get install python3-all-dev
+        # sudo apt-get install python2.7-dev python3-dev
         'PyYAML>=3.11',
-        'psycopg2',
-        
-#        'numpy',
-#        'scipy>=0.13.3',
-#        'pandas',
-#        'patsy',
-#        'statsmodels'
-#        'ggplot',
-        #'pytables',
-        #'h5py>=2.3.0',
     ]
+    if testing:
+        reqs.extend([
+            # Used for locally testing with a "real" database.
+            'psycopg2>=2.5.2',
+            'South>=0.8.4',
+            
+            # Used for plotting performance graphs.
+            #'matplotlib>=1.3.1',
+            
+            # Used for comparing our algorithm against similar tools.
+            #'scikit-learn>=0.14.1',
+        ])
     return reqs
 
 class TestCommand(Command):
@@ -57,7 +59,7 @@ class TestCommand(Command):
             cmd = '. {virtual_env_dir}/bin/activate; easy_install -U distribute; deactivate'.format(**kwargs)
             os.system(cmd)
             
-            for package in get_reqs():
+            for package in get_reqs(testing=True):
                 kwargs['package'] = package
                 cmd = '. {virtual_env_dir}/bin/activate; pip install -U {package}; deactivate'.format(**kwargs)
                 #print(cmd)
@@ -94,7 +96,7 @@ setup(
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
     ],
     zip_safe = False,
-    install_requires = get_reqs(),
+    install_requires = get_reqs(testing=False),
     cmdclass={
         'test': TestCommand,
     },

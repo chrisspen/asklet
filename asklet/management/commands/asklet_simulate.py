@@ -22,13 +22,15 @@ from asklet.utils import MatrixUser
 from asklet import models
 
 class Command(BaseCommand):
-    help = ''
+    help = 'Plays an arbitrary number of games against an automated user.'
     args = ''
     option_list = BaseCommand.option_list + (
         make_option('--seed', default=None),
         make_option('--pause', action='store_true', default=False),
         make_option('--verbose', action='store_true', default=False),
         make_option('--max-sessions', default=1000),
+        make_option('--domain', default='test'),
+        make_option('--matrix', default='asklet/tests/fixtures/matrix.yaml'),
         )
     
     def print_(self, *args):
@@ -41,7 +43,7 @@ class Command(BaseCommand):
             random.seed(int(options['seed']))
         
         domains = models.Domain.objects.all()
-        self.domain = models.Domain.objects.get(slug='test')
+        self.domain = models.Domain.objects.get(slug=options['domain'])
         
         self.verbose = options['verbose']
         self.pause = options['pause']
@@ -49,7 +51,7 @@ class Command(BaseCommand):
         
         print_ = self.print_
         
-        self.user = MatrixUser('asklet/tests/fixtures/matrix.yaml')
+        self.user = MatrixUser(options['matrix'])
         
         self.progress = [] # [(winner, steps, datetime)]
         self.total_count = 0
@@ -100,17 +102,23 @@ class Command(BaseCommand):
             things = []
             print_('-'*80)
             print_('Question %i' % (j+1,))
-            q = session.get_next_question()
+            q = session.get_next_question(verbose=self.verbose)
             if q is None:
                 print_('System: I give up. What was it?')
                 print_('User: %s' % user.target)
                 print_('System: Please describe three things about it.')
+                domain_question_count = session.domain.questions.all().count()
+                session_question_count = session.questions_count()
+#                print('')
+#                print('domain_question_count:',domain_question_count)
+#                print('session_question_count:',session_question_count)
+                assert session_question_count >= domain_question_count-2, 'Stopped before max_questions reached: %s' % (session_question_count,)
                 things = user.describe(3, exclude=prior_question_slugs)
                 self.progress.append((False, j, timezone.now()))
                 if self.pause: raw_input('enter')
                 break
             elif isinstance(q, models.Question):
-                print_('System: %s?' % u(q))
+                print_('System: %s?' % q.slug)
                 answer = user.ask(q.slug)
                 print_('User: %s' % answer)
                 print_('User is thinking %s.' % user.target)
@@ -118,17 +126,20 @@ class Command(BaseCommand):
                 if self.pause: raw_input('enter')
             elif isinstance(q, models.Target):
                 guess = q
-                print_('System: Are you thinking %s?' % u(q))
+                print_('System: Are you thinking %s?' % q.slug)
                 correct = user.is_it(target=q.slug)
                 self.correct_count += correct
                 print_('User: %s' % correct)
+                models.Answer.objects.get_or_create(
+                    session=session,
+                    guess=q,
+                    defaults=dict(answer=c.YES if correct else c.NO))
                 if correct:
                     print_('System: Horray!')
                     self.progress.append((True, j, timezone.now()))
                     if self.pause: raw_input('enter')
                     break
                 else:
-                    models.Answer.objects.create(session=session, guess=q, answer=c.YES if correct else c.NO)
                     print_('System: Aw shucks!')
                     if self.pause: raw_input('enter')
             else:

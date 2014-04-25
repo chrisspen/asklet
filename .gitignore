@@ -54,3 +54,4 @@ docs/_build/
 
 /.env2.7
 /.env3
+/.settings

@@ -19,6 +19,7 @@ class DomainAdmin(admin.ModelAdmin):
         'id',
         'slug',
         'targets_count',
+        'connectivity',
     )
     
     search_fields = (
@@ -26,6 +27,8 @@ class DomainAdmin(admin.ModelAdmin):
     )
     
     readonly_fields = (
+        'connectivity',
+        'accuracy_history',
         'targets_count',
         'questions_count',
     )
@@ -196,5 +199,8 @@ class SessionAdmin(admin.ModelAdmin):
     inlines = (
         AnswerInline,
     )
+    
+    def lookup_allowed(self, key, value=None):
+        return True
     
 admin.site.register(models.Session, SessionAdmin)

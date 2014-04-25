@@ -36,13 +36,37 @@ class Domain(models.Model):
         blank=False,
         null=False)
     
-    max_questions = models.PositiveIntegerField(default=20)
+    max_questions = models.PositiveIntegerField(
+        default=20,
+        help_text=_('''The maximum number of questions the system will
+            be allowed to ask in a session.'''))
+    
+    top_n_guess = models.PositiveIntegerField(
+        default=5,
+        help_text=_('''If a target is the top-ranked choice for this many
+            iterations, it will be used as a guess.'''))
     
     def __unicode__(self):
         return self.slug
     
     def __str__(self):
         return '<Domain: %s>' % (self.slug,)
+    
+    def accuracy_history(self, chunk=10):
+        try:
+            sessions = self.sessions.filter(winner__isnull=False).order_by('id')
+            history = []
+            correct = total = i = 0
+            for session in sessions.iterator():
+                i += 1
+                correct += session.winner
+                total += 1
+                if (i % chunk)+1 == chunk:
+                    history.append(correct/float(total))
+                    correct = total = 0
+            return history
+        except Exception as e:
+            return str(e)
     
     def get_session(self, user):
         try:
@@ -60,6 +84,15 @@ class Domain(models.Model):
             )
     
     @property
+    def connectivity(self):
+        max_weight_count = self.targets.all().count() * self.questions.all().count()
+        actual_weight_count = self.weights.all().count()
+        if not max_weight_count:
+            return
+        ratio = actual_weight_count/float(max_weight_count)
+        return ratio
+    
+    @property
     def weights(self):
         return TargetQuestionWeight.objects.filter(target__domain=self)
     
@@ -75,7 +108,7 @@ class Domain(models.Model):
                 return weights[0].weight
         return 0
     
-    def rank_targets(self, answers, prior_failed_target_ids=[], prior_top_target_ids=[], verbose=False):
+    def rank_targets(self, answers, prior_failed_target_ids=[], prior_top_target_ids=[], target_rankings=None, verbose=False):
         """
         Returns a list of targets ordered from most likely to least likely
         to be the user's choice.
@@ -93,7 +126,9 @@ class Domain(models.Model):
         even though the method below is not actually described in the patent
         filing.
         """
-        target_rankings = defaultdict(int) # {target:rank}
+        #print('target_rankings:',target_rankings)
+        assert isinstance(target_rankings, dict)
+        target_rankings = target_rankings or defaultdict(int) # {target:rank}
         targets = self.targets.all()
         
         # Exclude the targets the user has explicitly said NO to.
@@ -134,10 +169,19 @@ class Domain(models.Model):
         #print('targets:',targets)
         
         questions = Question.objects.askable(self.questions.all())
+        if verbose: print('askable0:',questions.count())
         if previous_question_ids:
+            if verbose: print('previous_question_ids:',previous_question_ids)
             questions = questions.exclude(id__in=previous_question_ids)
+        if verbose: print('askable1:',questions.count())
     
-        if verbose: print('%i askable questions' % questions.count())
+        if verbose:
+            print('%i askable questions out of %i total questions and %i questions asked' \
+                % (
+                   questions.count(),
+                   self.questions.all().count(),
+                   len(previous_question_ids),
+                ))
 #        splittable_questions = questions
         splittable_questions = questions.filter(
             weights__id__isnull=False,
@@ -185,7 +229,9 @@ class Session(models.Model):
     user_uuid = models.CharField(
         max_length=500,
         blank=True,
-        null=True)
+        null=True,
+        help_text=_('''A universally unique ID assigned to the user incase they
+            are anonymous and have not registered a user account.'''))
     
     winner = models.NullBooleanField(
         default=None,
@@ -217,6 +263,40 @@ class Session(models.Model):
     def __unicode__(self):
         return u('user %s in domain %s' % (self.user or self.user_uuid, self.domain))
     
+    def get_top_targets_cache(self):
+        prior_top_target_ids = []
+        if hasattr(self, '_cached_prior_top_target_ids'):
+            prior_top_target_ids = self._cached_prior_top_target_ids
+        return prior_top_target_ids
+        
+    def clear_top_targets_cache(self):
+        self._cached_prior_top_target_ids = []
+    
+    def save_top_targets_cache(self, lst):
+        self._cached_prior_top_target_ids = lst
+    
+    def get_target_rankings_cache(self):
+        if hasattr(self, '_cached_target_rankings'):
+            d = self._cached_target_rankings
+            if not isinstance(d, dict):
+                d = dict(d)
+            return d
+        return defaultdict(int)
+    
+    def save_target_rankings_cache(self, tr):
+        if not isinstance(tr, dict):
+            d = defaultdict(int)
+            d.update(tr)
+        self._cached_target_rankings = tr
+    
+    def get_prior_question_ids_cache(self):
+        if hasattr(self, '_cached_prior_question_ids'):
+            return self._cached_prior_question_ids
+        return []
+        
+    def save_prior_question_ids_cache(self, lst):
+        self._cached_prior_question_ids = lst
+    
     def get_next_question(self, verbose=0):
         """
         Returns the next best question to ask.
@@ -228,9 +308,7 @@ class Session(models.Model):
         prior_failed_target_ids = set(self.answers.filter(guess__isnull=False).values_list('guess_id', flat=True))
         if verbose: print('%i answers provided' % answers.count())
         
-        prior_top_target_ids = []
-        if hasattr(self, '_cached_prior_top_target_ids'):
-            prior_top_target_ids = self._cached_prior_top_target_ids
+        prior_top_target_ids = self.get_top_targets_cache()
         
         # First mode.
         # Rank targets according to the answers we've received so far.
@@ -240,15 +318,23 @@ class Session(models.Model):
         if verbose:
             print('Prior answers:')
             for answer in answers:
-                print(answer.question.slug, answer.answer)
+                if answer.question:
+                    print(answer.question.slug, answer.answer)
+                else:
+                    print(answer.guess.slug, answer.answer)
             print('')
         
 #        print('answers:',answers)
+        target_rankings = self.get_target_rankings_cache()
+        prior_question_ids = self.get_prior_question_ids_cache()
         top_targets = self.domain.rank_targets(
-            answers=dict((answer.question.slug, answer.answer) for answer in answers if answer.question),
+            answers=dict((answer.question.slug, answer.answer) for answer in answers if answer.question and answer.question.id not in prior_question_ids),
             prior_failed_target_ids=prior_failed_target_ids,
             prior_top_target_ids=prior_top_target_ids,
+            target_rankings=target_rankings,
         )
+        self.save_target_rankings_cache(top_targets)
+        self.save_prior_question_ids_cache(answer.question.id for answer in answers if answer.question)
         
         #TODO:remove targets that have low weights, 0050
         trunc = int(len(top_targets)*0.1)
@@ -261,30 +347,57 @@ class Session(models.Model):
             for target,rank in top_targets:
                 print('top target:', rank, target)
         
-        if not top_targets:
+        # Create and maintain a cached list of the last N top targets.
+        if not hasattr(self, '_cached_last_top_targets'):
+            self._cached_last_top_targets = []
+        last_top_targets = self._cached_last_top_targets
+        if top_targets:
+            last_top_targets.append(top_targets[0][0])
+        
+        last_top_targets_n = self.domain.top_n_guess
+        
+        if last_top_targets_n and len(last_top_targets) >= last_top_targets_n \
+        and len(set(last_top_targets[-last_top_targets_n:])) == 1:
+            # If the last N top targets are all the same, then guess that target.
+            top_target = last_top_targets[-1]
+            # Clear the cached list, so if we're wrong, we won't re-recommend the same target.
+            self._cached_last_top_targets = []
+            self.clear_top_targets_cache()
+            return top_target
+        elif not top_targets:
             return
         elif len(top_targets) == 1:
+            self.clear_top_targets_cache()
             return top_targets[0][0]
         elif answers.count()+1 == self.domain.max_questions:
             # We only have one more question left, so make our best guess.
+            self.clear_top_targets_cache()
             return top_targets[0][0]
         
-        self._cached_prior_top_target_ids = list(target.id for target,rank in top_targets)
+        self.save_top_targets_cache(list(target.id for target,rank in top_targets))
         
         # Second mode.
-        previous_question_ids = self.answers.values_list('question_id', flat=True)
+        previous_question_ids = self.answers.filter(question__isnull=False).values_list('question_id', flat=True)
+        #print('previous_question_ids:',previous_question_ids)
         question_rankings = self.domain.rank_questions(
             targets=[_1 for _1,_2 in top_targets],
             previous_question_ids=previous_question_ids,
             verbose=verbose)
         if question_rankings:
+            #print('best')
             best_question, best_rank = question_rankings[0]
             return best_question
         else:
+            #print('random:',previous_question_ids)
             questions = Question.objects.askable(self.domain.questions.all())
+            if previous_question_ids:
+                questions = questions.exclude(id__in=previous_question_ids)
             if questions.exists():
                 # Otherwise just pick a question at random.
-                return questions.order_by('?')[0]
+                #print('questions:',questions)
+                rand_q = questions.order_by('?')[0]
+                #print('randomly selected:',rand_q)
+                return rand_q
 
     def record_result(self, guess, actual, merge=False, attrs=[], verbose=0):
         """
@@ -295,7 +408,7 @@ class Session(models.Model):
         for attr, belief in attrs:
             if verbose: print('User: %s %s' % (attr, belief))
             question, _ = Question.objects.get_or_create(domain=self.domain, slug=attr)
-            Answer.objects.create(session=self, question=question, answer=belief)
+            Answer.objects.get_or_create(session=self, question=question, defaults=dict(answer=belief))
         
         if isinstance(actual, Target):
             target = actual
@@ -330,7 +443,7 @@ class Session(models.Model):
         """
         Adds the weight of all answers into the domain's master weight matrix.
         """
-        if self.merged:
+        if self.merged or not self.target:
             return
     
         for answer in self.answers.all():
@@ -535,6 +648,8 @@ class Answer(models.Model):
         ordering = ('id',)
         unique_together = (
             ('session', 'question', 'guess'),
+            ('session', 'question'),
+            ('session', 'guess'),
         )
     
     def __str__(self):
