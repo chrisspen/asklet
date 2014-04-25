@@ -17,3 +17,11 @@ Installation
 
 Usage
 -----
+
+To run unittests, execute:
+
+    python setup.py test
+    
+To run unittests for a specific Python version (e.g. 3), execute:
+
+    python setup.py test --pv=3

@@ -16,6 +16,7 @@ import yaml
 
 from asklet import models
 from asklet import constants as c
+from asklet import utils
 
 #cat,dog,pig,rat,bat,bird,human
 #plane,car,truck,train,motorcycle
@@ -53,17 +54,17 @@ class Tests(TestCase):
         
         # Question index should be automatically incremented per domain.
         q1 = models.Question.objects.create(domain=domain, slug='has_fur')
-        print(q1.index)
+        #print(q1.index)
         q2 = models.Question.objects.create(domain=domain, slug='has_wings')
-        print(q2.index)
+        #print(q2.index)
         q3 = models.Question.objects.create(domain=domain, slug='barks')
-        print(q3.index)
+        #print(q3.index)
         self.assertEqual(q3.index, 2)
         
         try:
             # Duplicates should be prevented.
             q4 = models.Question.objects.create(domain=domain, slug='barks')
-            print(q4.index)
+            #print(q4.index)
             self.assert_(0)
         except IntegrityError:
             pass
@@ -73,9 +74,9 @@ class Tests(TestCase):
         self.assertEqual(domains.count(), 1)
         domain = models.Domain.objects.get(slug='test')
         
-        mu = MatrixUser('asklet/tests/fixtures/matrix.yaml')
+        mu = utils.MatrixUser('asklet/tests/fixtures/matrix.yaml')
         mu.target = 'bird'
-        print(mu.target)
+        #print(mu.target)
         
         session = domain.get_session(mu)
         q = session.get_next_question()
@@ -85,11 +86,11 @@ class Tests(TestCase):
         self.assertEqual(session.merged, True)
         
         weights = list(domain.weights)
-        print(weights)
+        #print(weights)
         self.assertEqual(len(weights), 3)
         self.assertTrue(weights[0].weight)
         
-    def test_learn_auto(self):
+    def _test_learn_auto(self):
         domains = models.Domain.objects.all()
         self.assertEqual(domains.count(), 1)
         domain = models.Domain.objects.get(slug='test')

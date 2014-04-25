@@ -274,8 +274,10 @@ class Session(models.Model):
             best_question, best_rank = question_rankings[0]
             return best_question
         else:
-            # Otherwise just pick a question at random.
-            return random.choice(list(questions))
+            questions = Question.objects.askable(self.domain.questions.all())
+            if questions.exists():
+                # Otherwise just pick a question at random.
+                return questions.order_by('?')[0]
 
     def record_result(self, guess, actual, merge=False, attrs=[], verbose=0):
         """

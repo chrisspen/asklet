@@ -12,6 +12,7 @@ def get_reqs():
         # Note, you may need to do:
         # sudo apt-get install python3-all-dev
         'PyYAML>=3.11',
+        'psycopg2',
         
 #        'numpy',
 #        'scipy>=0.13.3',
@@ -19,7 +20,6 @@ def get_reqs():
 #        'patsy',
 #        'statsmodels'
 #        'ggplot',
-#        'psycopg2',
         #'pytables',
         #'h5py>=2.3.0',
     ]
