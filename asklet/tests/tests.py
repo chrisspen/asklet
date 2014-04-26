@@ -114,4 +114,27 @@ class Tests(TestCase):
         history = domain.accuracy_history()
         #print('history:',history)
         self.assertEqual(history[-1], 1.0)
+    
+    def test_numpy(self):
+        import pickle
+        import numpy as np
+        from scipy.sparse import coo_matrix
+        nrow = 10000000
+        ncol = 10000000
+        m_coo = coo_matrix((nrow, ncol), np.int32)
+        #m = m.to_csr()[rows_to_keep, :]
+        #m = m.to_csc()[:, cols_to_keep]
+        
+        #TODO:takes forever?
+        #print('To lil...')
+        #m_lil = m_coo.tolil()
+        
+        print('To dok...')
+        m_dok = m_coo.todok()
+        print(m_dok[103, 43534])
+        
+        print('Saving...')
+        pickle.dump(m_coo, open('/tmp/asklet-matrix-coo.pkl','wb'))
+        #pickle.dump(m_lil, open('/tmp/asklet-matrix-lil.pkl','wb'))
+        pickle.dump(m_dok, open('/tmp/asklet-matrix-dok.pkl','wb'))
         

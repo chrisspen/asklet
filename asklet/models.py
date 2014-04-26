@@ -32,6 +32,7 @@ class Domain(models.Model):
     """
     
     slug = models.SlugField(
+        max_length=500,
         unique=True,
         blank=False,
         null=False)
@@ -478,6 +479,7 @@ class Target(models.Model):
     domain = models.ForeignKey(Domain, related_name='targets')
     
     slug = models.SlugField(
+        max_length=500,
         blank=False,
         null=False,
         db_index=True)
@@ -487,6 +489,13 @@ class Target(models.Model):
         editable=False,
         db_index=True)
 
+    conceptnet_subject = models.CharField(
+        max_length=500,
+        db_index=True,
+        blank=True,
+        null=True,
+        help_text=_('The URI of the subject in ConceptNet5.'))
+    
     enabled = models.BooleanField(
         default=False,
         db_index=True)
@@ -495,6 +504,7 @@ class Target(models.Model):
         unique_together = (
             ('domain', 'slug'),
             ('domain', 'index'),
+            ('domain', 'conceptnet_subject'),
         )
     
     def __unicode__(self):
@@ -525,6 +535,7 @@ class Question(models.Model):
     domain = models.ForeignKey(Domain, related_name='questions')
     
     slug = models.SlugField(
+        max_length=500,
         blank=False,
         null=False,
         db_index=True)
@@ -539,8 +550,22 @@ class Question(models.Model):
         editable=False,
         db_index=True)
     
+    conceptnet_predicate = models.CharField(
+        max_length=500,
+        db_index=True,
+        blank=True,
+        null=True,
+        help_text=_('The URI of the predicate in ConceptNet5.'))
+    
+    conceptnet_object = models.CharField(
+        max_length=500,
+        db_index=True,
+        blank=True,
+        null=True,
+        help_text=_('The URI of the object in ConceptNet5.'))
+    
     enabled = models.BooleanField(
-        default=True,
+        default=False,
         db_index=True,
         help_text=_('''If checked, this question might be asked of the user.
             Otherwise, it will not be asked.'''))
@@ -549,6 +574,7 @@ class Question(models.Model):
         unique_together = (
             ('domain', 'slug'),
             ('domain', 'index'),
+            ('domain', 'conceptnet_predicate', 'conceptnet_object'),
         )
     
     def __unicode__(self):

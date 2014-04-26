@@ -6,7 +6,7 @@ Overview
 
 An algorithm for playing [20 questions](http://en.wikipedia.org/wiki/Twenty_Questions),
 inspired by [Robin Burgener's implementation](http://www.google.com/patents/US20060230008?dq=Artificial+neural+network+guessing+method+and+game),
-which is used to power website [20q.net](http://www.20q.net/).
+which is used to power the website [20q.net](http://www.20q.net/).
 
 Note, Burgener's patent filing doesn't completely describe how the target rank
 is calculated, so I had to improvise my own method, but otherwise this should

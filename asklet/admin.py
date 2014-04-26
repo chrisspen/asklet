@@ -36,14 +36,16 @@ class DomainAdmin(admin.ModelAdmin):
     def targets_count(self, obj):
         if not obj:
             return 0
-        return obj.targets.all().count()
+        return '<a href="/admin/asklet/target/?domain=%i" class="button" target="_blank">View %i</a>' % (obj.id, obj.targets.all().count(),)
     targets_count.short_description = 'targets'
+    targets_count.allow_tags = True
     
     def questions_count(self, obj):
         if not obj:
             return 0
-        return obj.questions.all().count()
+        return '<a href="/admin/asklet/question/?domain=%i" class="button" target="_blank">View %i</a>' % (obj.id, obj.questions.all().count(),)
     questions_count.short_description = 'questions'
+    questions_count.allow_tags = True
 
 admin.site.register(models.Domain, DomainAdmin)
 

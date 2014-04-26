@@ -18,6 +18,7 @@ INSTALLED_APPS = [
     'south',
     'asklet',
     'asklet.tests',
+    #'database_size',
 ]
 MEDIA_ROOT = os.path.join(PROJECT_DIR, 'media')
 STATIC_ROOT = os.path.join(PROJECT_DIR, 'static')
