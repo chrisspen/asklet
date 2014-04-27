@@ -19,7 +19,7 @@ class DomainAdmin(admin.ModelAdmin):
         'id',
         'slug',
         'targets_count',
-        'connectivity',
+        'connectivity_str',
     )
     
     search_fields = (
@@ -27,11 +27,17 @@ class DomainAdmin(admin.ModelAdmin):
     )
     
     readonly_fields = (
-        'connectivity',
+        'connectivity_str',
         'accuracy_history',
         'targets_count',
         'questions_count',
     )
+    
+    def connectivity_str(self, obj):
+        if not obj:
+            return
+        return '%.06f' % obj.connectivity
+    connectivity_str.short_description = 'connectivity'
     
     def targets_count(self, obj):
         if not obj:
@@ -148,6 +154,9 @@ class TargetQuestionWeightAdmin(admin.ModelAdmin):
         #'weights_count',
         'normalized_weight',
     )
+    
+    def lookup_allowed(self, key, value=None):
+        return True
     
     def weights_count(self, obj):
         if not obj:

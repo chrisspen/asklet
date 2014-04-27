@@ -107,13 +107,13 @@ class ShellUser(BaseUser):
         self.save()
     
     @classmethod
-    def load(cls):
+    def load(cls, clear=False):
         """
         Loads the locally saved user id.
         """
         id = None
         fn = cls.id_filename
-        if os.path.isfile(fn):
+        if not clear and os.path.isfile(fn):
             id = open(fn, 'r').read().strip()
         return cls(id=id)
     

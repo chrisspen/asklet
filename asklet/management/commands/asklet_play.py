@@ -28,8 +28,10 @@ class Command(BaseCommand):
         make_option('--seed', default=None),
         make_option('--domain', default='test'),
 #        make_option('--pause', action='store_true', default=False),
-#        make_option('--verbose', action='store_true', default=False),
+        make_option('--verbose', action='store_true', default=False),
 #        make_option('--max-sessions', default=1000),
+        make_option('--ranker', default=None),
+        make_option('--clear-session', action='store_true', default=False),
         )
     
     
@@ -37,9 +39,15 @@ class Command(BaseCommand):
         if options['seed']:
             random.seed(int(options['seed']))
         
+        verbose = options['verbose']
+        
+        ranker = options['ranker']
+        if ranker:
+            settings.ASKLET_RANKER = ranker
+        
         domain = self.domain = models.Domain.objects.get(slug=options['domain'])
         
-        user = self.user = ShellUser.load()
+        user = self.user = ShellUser.load(clear=options['clear_session'])
         print('User ID:',user.id)
         session = self.session = domain.get_session(user.id)
         print('Session:',session.id)
@@ -53,7 +61,7 @@ class Command(BaseCommand):
             else:
                 if qi == 1:
                     raw_input('Thing of something and I will try to guess it. Press enter when ready.')
-                q = session.get_next_question(verbose=1)
+                q = session.get_next_question(verbose=verbose)
                 if q is None:
                     self.admit_defeat()
                     return

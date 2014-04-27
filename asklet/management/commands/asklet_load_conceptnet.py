@@ -81,7 +81,7 @@ class ConceptNetEdge(object):
         return '%s->%s->%s' % (self.start, self.rel, self.end)
 
 class Command(BaseCommand):
-    help = ''
+    help = 'Loads targets, questions and weights from a ConceptNet5 CSV dump file.'
     args = ''
     option_list = BaseCommand.option_list + (
         #make_option('--seed', default=None),

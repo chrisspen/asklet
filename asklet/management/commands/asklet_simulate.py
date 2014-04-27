@@ -112,7 +112,8 @@ class Command(BaseCommand):
 #                print('')
 #                print('domain_question_count:',domain_question_count)
 #                print('session_question_count:',session_question_count)
-                assert session_question_count >= domain_question_count-2, 'Stopped before max_questions reached: %s' % (session_question_count,)
+                assert session_question_count >= domain_question_count-2, \
+                    'Stopped before max_questions reached: %s' % (session_question_count,)
                 things = user.describe(3, exclude=prior_question_slugs)
                 self.progress.append((False, j, timezone.now()))
                 if self.pause: raw_input('enter')
@@ -130,6 +131,10 @@ class Command(BaseCommand):
                 correct = user.is_it(target=q.slug)
                 self.correct_count += correct
                 print_('User: %s' % correct)
+                print_('guess:',guess)
+                prior_identical_guesses = models.Answer.objects.filter(session=session, guess=guess)
+                assert prior_identical_guesses.count() == 0, \
+                    '%i prior identical guesses' % (prior_identical_guesses.count(),)
                 models.Answer.objects.get_or_create(
                     session=session,
                     guess=q,

@@ -7,6 +7,7 @@ from django.test import TestCase
 from django.db.utils import IntegrityError
 from django.db import transaction
 from django.utils import timezone
+from django.conf import settings
 from django.core.management import call_command
 
 from six.moves import cPickle as pickle
@@ -20,15 +21,18 @@ from asklet import models
 from asklet import constants as c
 from asklet import utils
 
-# Ensure our random selections are deterministic for easier testing.
-random.seed(0)
-
 class Tests(TestCase):
     
     fixtures = ['test_data.yaml']
     
     def setUp(self):
-        pass
+
+        # Ensure our random selections are deterministic for easier testing.
+        random.seed(0)
+        
+        # Ensure backends are reset to defaults.
+        settings.ASKLET_BACKEND = c.SQL
+        settings.ASKLET_RANKER = c.PYTHON
     
     def test_models(self):
         domain = models.Domain.objects.create(slug='_test')
@@ -44,9 +48,22 @@ class Tests(TestCase):
         
         try:
             # Duplicates should be prevented.
-            q4 = models.Question.objects.create(domain=domain, slug='barks')
+            with transaction.atomic():
+                q4 = models.Question.objects.create(domain=domain, slug='barks')
             #print(q4.index)
-            self.assert_(0)
+            self.assertTrue(0, 'Duplicate question allowed.')
+        except IntegrityError:
+            pass
+        
+        bat = models.Target.objects.create(domain=domain, slug='bat')
+        
+        session = domain.get_session('test-user')
+        
+        models.Answer.objects.create(session=session, guess=bat, answer=c.YES)
+        try:
+            with transaction.atomic():
+                models.Answer.objects.create(session=session, guess=bat, answer=c.YES)
+            self.assertTrue(0, 'Duplicate answers were given.')
         except IntegrityError:
             pass
     
@@ -99,6 +116,31 @@ class Tests(TestCase):
         answers = session.answers.all()
         self.assertEqual(answers.count(), 2)
         
+        q = session.get_next_question()
+#        print(q)
+        
+    def test_learn_manual_sql(self):
+        settings.ASKLET_RANKER = c.SQL
+        
+        domain = models.Domain.objects.get(slug='test')
+        
+        q1 = models.Question.objects.create(domain=domain, slug='has_fur', enabled=1)
+        q2 = models.Question.objects.create(domain=domain, slug='has_wings', enabled=1)
+        q3 = models.Question.objects.create(domain=domain, slug='barks', enabled=1)
+        
+        bat = models.Target.objects.create(domain=domain, slug='bat', enabled=1)
+        rat = models.Target.objects.create(domain=domain, slug='rat', enabled=1)
+        bird = models.Target.objects.create(domain=domain, slug='bird', enabled=1)
+        
+        mu = utils.MatrixUser('asklet/tests/fixtures/matrix.yaml')
+        mu.target = 'bird'
+        #print(mu.target)
+        
+        session = domain.get_session(mu)
+        q = session.get_next_question()
+        self.assertTrue(q)
+#        print(q)
+        
     def test_learn_auto(self):
         """
         Confirms the system can learn a toy knowledgebase from scratch.
@@ -108,13 +150,31 @@ class Tests(TestCase):
         self.assertEqual(domains.count(), 1)
         domain_name = 'test'
         
-        call_command('asklet_simulate', max_sessions=100, domain=domain_name)
+        call_command('asklet_simulate', max_sessions=150, domain=domain_name, verbose=0, seed=0)
         
         domain = models.Domain.objects.get(slug=domain_name)
         history = domain.accuracy_history()
         #print('history:',history)
         self.assertEqual(history[-1], 1.0)
     
+    def test_learn_auto_sql(self):
+        """
+        Confirms the system can learn a toy knowledgebase from scratch.
+        Should obtain 100% accuracy within the first 100 sessions.
+        """
+        settings.ASKLET_RANKER = c.SQL
+        
+        domains = models.Domain.objects.all()
+        self.assertEqual(domains.count(), 1)
+        domain_name = 'test'
+        
+        call_command('asklet_simulate', max_sessions=150, domain=domain_name, verbose=0, seed=0)
+        
+        domain = models.Domain.objects.get(slug=domain_name)
+        history = domain.accuracy_history()
+        #print('history:',history)
+        self.assertEqual(history[-1], 1.0)
+        
     def test_numpy(self):
         import pickle
         import numpy as np
@@ -129,12 +189,41 @@ class Tests(TestCase):
         #print('To lil...')
         #m_lil = m_coo.tolil()
         
-        print('To dok...')
+        #print('To dok...')
         m_dok = m_coo.todok()
-        print(m_dok[103, 43534])
+        ret = m_dok[103, 43534]
+        #print(ret)
         
-        print('Saving...')
+#        print('Saving...')
         pickle.dump(m_coo, open('/tmp/asklet-matrix-coo.pkl','wb'))
-        #pickle.dump(m_lil, open('/tmp/asklet-matrix-lil.pkl','wb'))
+        #pickle.dump(m_lil, open('/tmp/asklet-matrix-lil.pkl','wb'))#massive?
         pickle.dump(m_dok, open('/tmp/asklet-matrix-dok.pkl','wb'))
-        
+    
+    def test_ranking(self):
+        weights = [
+            #(them,us)
+            (1,1),
+            (4,4),
+            (4,3),
+            (4,2),
+            (4,1),
+            (4,0),
+            (4,-1),
+            (4,-2),
+            (4,-3),
+            (4,-4),
+            (3,-4),
+            (2,-4),
+            (1,-4),
+            (0,-4),
+            (-1,-4),
+            (-2,-4),
+            (-3,-4),
+            (-4,-4),
+        ]
+        for them, us in weights:
+            agg1 = models.calculate_target_rank_item1(local_weight=them, answer_weight=us)
+            agg2 = models.calculate_target_rank_item2(local_weight=them, answer_weight=us)
+            #print(them, us, agg1, agg2)
+            self.assertEqual(agg1, agg2)
+            

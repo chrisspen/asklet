@@ -24,3 +24,14 @@ ANSWER_CHOICES = (
     
     (UNKNOWN, 'unknown'),
 )
+
+SQL = 'sql'
+BACKENDS = (
+    SQL,
+)
+
+PYTHON = 'python'
+RANKERS = (
+    SQL,
+    PYTHON,
+)

@@ -62,7 +62,8 @@ AUTH_USER_MODEL = 'auth.User'
 
 SECRET_KEY = '-a-nku-@g0ig9_%(r2_o+fabjf-knwaeujwfs@rt!z^ox=7$2d'
 
-try:
-    from .settings_local import *
-except ImportError:
-    raise
+if 'test' not in sys.argv:
+    try:
+        from .settings_local import *
+    except ImportError:
+        raise
