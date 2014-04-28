@@ -164,9 +164,15 @@ LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
     AND a.question_id = tqw.question_id
 LEFT OUTER JOIN asklet_target AS t on
         t.id = tqw.target_id
-WHERE   s.id = {session_id} {question_ids_str} {exclude_target_ids_str} {only_target_ids_str}
-GROUP BY
-        s.id, t.id
+LEFT OUTER JOIN asklet_question AS q on
+        q.id = tqw.question_id
+WHERE   s.id = {session_id}
+    AND t.enabled = 1
+    AND q.enabled = 1
+    {question_ids_str}
+    {exclude_target_ids_str}
+    {only_target_ids_str}
+GROUP BY s.id, t.id
 ORDER BY rank DESC;
         """.format(
             session_id=session_id,
@@ -174,7 +180,7 @@ ORDER BY rank DESC;
             exclude_target_ids_str=exclude_target_ids_str,
             only_target_ids_str=only_target_ids_str,
         )
-#        print('sql:',sql)
+#        print('target sql:',sql)
         cursor.execute(sql)
         return cursor
     
@@ -301,8 +307,73 @@ ORDER BY rank DESC;
         ranker = settings.ASKLET_RANKER.lower()
         return getattr(self, 'rank_questions_%s' % ranker)(*args, **kwargs)
     
+    def _query_questionrankings(self, domain_id, only_target_ids=[], exclude_question_ids=[]):
+        
+        only_target_ids_str = ''
+        if only_target_ids:
+            only_target_ids_str = 'AND tqw.target_id IN (' + (','.join(map(str, only_target_ids))) + ')'
+        
+        exclude_question_ids_str = ''
+        if exclude_question_ids:
+            exclude_question_ids_str = 'AND q.id NOT IN (' + (','.join(map(str, exclude_question_ids))) + ')'
+        
+#        print('%i enabled questions' % self.questions.filter(enabled=True).count())
+#        print('%i question weights' % TargetQuestionWeight.objects.filter(question__domain=self).count())
+        
+        cursor = connection.cursor()
+        sql = """
+SELECT  m.question_id,
+        ABS(m.weight_sum + ((m.total_count - m.target_count)*-4)) AS weight_sum_abs,
+        m.weight_sum,
+        m.target_count,
+        m.total_count
+FROM (
+    SELECT  q.id AS question_id,
+            SUM(tqw.weight/CAST(tqw.count AS float)) AS weight_sum,
+            COUNT(tqw.target_id) AS target_count,
+            (SELECT COUNT(id) FROM asklet_target WHERE domain_id = {domain_id}) AS total_count
+    FROM    asklet_question AS q
+    LEFT OUTER JOIN
+            asklet_targetquestionweight AS tqw ON
+            tqw.question_id = q.id
+        AND tqw.weight IS NOT NULL
+    WHERE   q.enabled = 1
+        AND q.domain_id = {domain_id}
+        {only_target_ids_str}
+        {exclude_question_ids_str}
+    GROUP BY q.id
+) AS m
+WHERE m.weight_sum IS NOT NULL
+ORDER BY weight_sum_abs ASC
+LIMIT 1;
+        """.format(
+            domain_id=domain_id,
+            only_target_ids_str=only_target_ids_str,
+            exclude_question_ids_str=exclude_question_ids_str,
+        )
+#        print('question sql:',sql)
+        cursor.execute(sql)
+        results = []
+        for question_id, weight_sum_abs, weight_sum, target_count, total_count in cursor:
+#            print('row:',question_id, weight_sum_abs, weight_sum, target_count, total_count)
+            results.append((question_id, weight_sum_abs))
+        return results
+    
     def rank_questions_sql(self, targets, previous_question_ids=[], verbose=True):
-        return self.rank_questions_python(targets=targets, previous_question_ids=previous_question_ids, verbose=verbose)
+        results = self._query_questionrankings(
+            domain_id=self.id,
+            only_target_ids=[_ if isinstance(_, int) else _.id for _ in targets],
+            exclude_question_ids=previous_question_ids)
+        question_rankings = defaultdict(int) # {question:rank}
+#        print('results:',results)
+        for question_id, rank in results:
+            question = Question.objects.get(id=question_id)
+            question_rankings[question] = rank
+
+        #TODO:rank questions by finding the one with the most even YES/NO split, explained in 0053
+        # Lower rank means better splitting criteria.
+        question_rankings = sorted(question_rankings.items(), key=lambda o: abs(o[1]))
+        return question_rankings
         
     def rank_questions_python(self, targets, previous_question_ids=[], verbose=True):
         """
@@ -396,9 +467,27 @@ class Session(models.Model):
     
     created = models.DateTimeField(auto_now_add=True)
     
-    def questions_count(self):
+    def question_count(self):
         return self.answers.all().count()
-    questions_count.short_description = 'questions'
+    question_count.short_description = 'questions'
+    
+    @property
+    def unguessed_targets(self):
+        guessed_targets = self.answers\
+            .filter(guess__isnull=False)\
+            .values_list('guess_id', flat=True)
+        return self.domain.targets\
+            .filter(enabled=True)\
+            .exclude(id__in=guessed_targets)
+    
+    @property
+    def minimum_question_count(self):
+        """
+        The minimum number of questions the system is allowed to ask.
+        """
+        unguessed_target_count = self.unguessed_targets.count()
+        domain_question_count = self.domain.questions.filter(enabled=True).count()
+        return min(unguessed_target_count, domain_question_count-2)
     
     def __unicode__(self):
         return u('user %s in domain %s' % (self.user or self.user_uuid, self.domain))

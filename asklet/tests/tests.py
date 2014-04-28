@@ -168,7 +168,12 @@ class Tests(TestCase):
         self.assertEqual(domains.count(), 1)
         domain_name = 'test'
         
-        call_command('asklet_simulate', max_sessions=150, domain=domain_name, verbose=0, seed=0)
+        call_command(
+            'asklet_simulate',
+            max_sessions=150,
+            domain=domain_name,
+            verbose=0,#enable for debugging messages
+            seed=0)
         
         domain = models.Domain.objects.get(slug=domain_name)
         history = domain.accuracy_history()

@@ -107,12 +107,12 @@ class Command(BaseCommand):
                 print_('System: I give up. What was it?')
                 print_('User: %s' % user.target)
                 print_('System: Please describe three things about it.')
-                domain_question_count = session.domain.questions.all().count()
-                session_question_count = session.questions_count()
+#                domain_question_count = session.domain.questions.all().count()
+                session_question_count = session.question_count()
 #                print('')
 #                print('domain_question_count:',domain_question_count)
 #                print('session_question_count:',session_question_count)
-                assert session_question_count >= domain_question_count-2, \
+                assert session_question_count >= session.minimum_question_count, \
                     'Stopped before max_questions reached: %s' % (session_question_count,)
                 things = user.describe(3, exclude=prior_question_slugs)
                 self.progress.append((False, j, timezone.now()))
