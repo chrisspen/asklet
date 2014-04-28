@@ -30,7 +30,7 @@ class DomainAdmin(admin.ModelAdmin):
         'connectivity_str',
         'accuracy_history',
         'targets_count',
-        'questions_count',
+        'question_count',
     )
     
     def connectivity_str(self, obj):
@@ -46,12 +46,12 @@ class DomainAdmin(admin.ModelAdmin):
     targets_count.short_description = 'targets'
     targets_count.allow_tags = True
     
-    def questions_count(self, obj):
+    def question_count(self, obj):
         if not obj:
             return 0
         return '<a href="/admin/asklet/question/?domain=%i" class="button" target="_blank">View %i</a>' % (obj.id, obj.questions.all().count(),)
-    questions_count.short_description = 'questions'
-    questions_count.allow_tags = True
+    question_count.short_description = 'questions'
+    question_count.allow_tags = True
 
 admin.site.register(models.Domain, DomainAdmin)
 
@@ -121,8 +121,9 @@ class QuestionAdmin(admin.ModelAdmin):
     def weights_count(self, obj):
         if not obj:
             return 0
-        return obj.weights.all().count()
+        return '<a href="/admin/asklet/targetquestionweight/?question=%i" class="button" target="_blank">View %i</a>' % (obj.id, obj.weights.all().count(),)
     weights_count.short_description = 'weights'
+    weights_count.allow_tags = True
     
 admin.site.register(models.Question, QuestionAdmin)
 
@@ -187,7 +188,7 @@ class SessionAdmin(admin.ModelAdmin):
         'user_uuid',
         'winner',
         'target',
-        'questions_count',
+        'question_count',
         'merged',
         'created',
     )
@@ -204,7 +205,7 @@ class SessionAdmin(admin.ModelAdmin):
     )
     
     readonly_fields = (
-        'questions_count',
+        'question_count',
     )
     
     inlines = (

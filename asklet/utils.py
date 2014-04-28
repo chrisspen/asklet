@@ -176,9 +176,9 @@ class ShellUser(BaseUser):
         assert n > 0
         print('Please describe %i things about this.' % n)
         while len(things) < n:
-            response = raw_input('<thing> <weight>')
-            response = sterialize(response)
-            parts = response.split('_')
+            response = raw_input('<thing> <weight>').strip()
+            #response = sterialize(response)
+            parts = response.split(' ')
             if parts:
                 weight = parts[-1]
                 if is_int(weight):

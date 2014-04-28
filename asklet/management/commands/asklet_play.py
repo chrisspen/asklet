@@ -60,7 +60,7 @@ class Command(BaseCommand):
                     return
             else:
                 if qi == 1:
-                    raw_input('Thing of something and I will try to guess it. Press enter when ready.')
+                    raw_input('Think of something and I will try to guess it. Press enter when ready.')
                 q = session.get_next_question(verbose=verbose)
                 if q is None:
                     self.admit_defeat()
@@ -75,6 +75,12 @@ class Command(BaseCommand):
                 elif isinstance(q, models.Target):
                     print('Question %i:' % qi)
                     correct = user.is_it(target=q.slug)
+                    
+                    models.Answer.objects.create(
+                        session=session,
+                        guess=q,
+                        answer=c.YES if correct else c.NO)
+                    
                     if correct:
                         print('Horray!')
                         session.target = q
@@ -82,10 +88,6 @@ class Command(BaseCommand):
                         session.save()
                         return
                     else:
-                        models.Answer.objects.create(
-                            session=session,
-                            guess=q,
-                            answer=c.YES if correct else c.NO)
                         print('Aw shucks!')
 
     def admit_defeat(self):

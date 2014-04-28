@@ -136,7 +136,7 @@ class Domain(models.Model):
         ranker = settings.ASKLET_RANKER.lower()
         return getattr(self, 'rank_targets_%s' % ranker)(*args, **kwargs)
     
-    def _query_targetrankings(self, session_id, question_ids=[], exclude_target_ids=[], only_target_ids=[]):
+    def _query_targetrankings(self, session_id, question_ids=[], exclude_target_ids=[], only_target_ids=[], verbose=0):
         
         question_ids_str = ''
         if question_ids:
@@ -147,7 +147,7 @@ class Domain(models.Model):
             exclude_target_ids_str = 'AND t.id NOT IN (' + (','.join(map(str, exclude_target_ids))) + ')'
             
         only_target_ids_str = ''
-        if only_target_ids:
+        if only_target_ids and len(only_target_ids) <= 1000:
             only_target_ids_str = 'AND t.id IN (' + (','.join(map(str, only_target_ids))) + ')'
             
         cursor = connection.cursor()
@@ -167,8 +167,8 @@ LEFT OUTER JOIN asklet_target AS t on
 LEFT OUTER JOIN asklet_question AS q on
         q.id = tqw.question_id
 WHERE   s.id = {session_id}
-    AND t.enabled = 1
-    AND q.enabled = 1
+    AND t.enabled = CAST(1 AS bool)
+    AND q.enabled = CAST(1 AS bool)
     {question_ids_str}
     {exclude_target_ids_str}
     {only_target_ids_str}
@@ -180,7 +180,7 @@ ORDER BY rank DESC;
             exclude_target_ids_str=exclude_target_ids_str,
             only_target_ids_str=only_target_ids_str,
         )
-#        print('target sql:',sql)
+        if verbose: print('target sql:',sql)
         cursor.execute(sql)
         return cursor
     
@@ -221,6 +221,7 @@ ORDER BY rank DESC;
             question_ids=Question.objects.filter(domain=session.domain, slug__in=answers.keys()).values_list('id', flat=True),
             exclude_target_ids=prior_failed_target_ids,
             only_target_ids=prior_top_target_ids,
+            verbose=verbose,
         )
         for session_id, target_id, rank in cursor:
 #            print(session_id, target_id, rank)
@@ -307,10 +308,10 @@ ORDER BY rank DESC;
         ranker = settings.ASKLET_RANKER.lower()
         return getattr(self, 'rank_questions_%s' % ranker)(*args, **kwargs)
     
-    def _query_questionrankings(self, domain_id, only_target_ids=[], exclude_question_ids=[]):
+    def _query_questionrankings(self, domain_id, only_target_ids=[], exclude_question_ids=[], verbose=0):
         
         only_target_ids_str = ''
-        if only_target_ids:
+        if only_target_ids and len(only_target_ids) <= 1000:
             only_target_ids_str = 'AND tqw.target_id IN (' + (','.join(map(str, only_target_ids))) + ')'
         
         exclude_question_ids_str = ''
@@ -337,7 +338,7 @@ FROM (
             asklet_targetquestionweight AS tqw ON
             tqw.question_id = q.id
         AND tqw.weight IS NOT NULL
-    WHERE   q.enabled = 1
+    WHERE   q.enabled = CAST(1 AS bool)
         AND q.domain_id = {domain_id}
         {only_target_ids_str}
         {exclude_question_ids_str}
@@ -351,7 +352,7 @@ LIMIT 1;
             only_target_ids_str=only_target_ids_str,
             exclude_question_ids_str=exclude_question_ids_str,
         )
-#        print('question sql:',sql)
+        if verbose: print('question sql:',sql)
         cursor.execute(sql)
         results = []
         for question_id, weight_sum_abs, weight_sum, target_count, total_count in cursor:
@@ -363,7 +364,8 @@ LIMIT 1;
         results = self._query_questionrankings(
             domain_id=self.id,
             only_target_ids=[_ if isinstance(_, int) else _.id for _ in targets],
-            exclude_question_ids=previous_question_ids)
+            exclude_question_ids=previous_question_ids,
+            verbose=verbose)
         question_rankings = defaultdict(int) # {question:rank}
 #        print('results:',results)
         for question_id, rank in results:
@@ -579,6 +581,7 @@ class Session(models.Model):
             prior_failed_target_ids=prior_failed_target_ids,
             prior_top_target_ids=prior_top_target_ids,
             target_rankings=target_rankings,
+            verbose=verbose,
         )
 #        print('refreshed top_targets:',top_targets)
         if top_targets:
@@ -599,7 +602,7 @@ class Session(models.Model):
         if verbose:
             print('%i top targets b' % len(top_targets))
             for target,rank in top_targets:
-                print('top target:', rank, target)
+                #print('top target:', rank, target)
                 assert target.id not in prior_failed_target_ids
         
         # Create and maintain a cached list of the last N top targets.
