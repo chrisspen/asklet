@@ -330,7 +330,8 @@ SELECT  m.question_id,
         m.total_count
 FROM (
     SELECT  q.id AS question_id,
-            SUM(tqw.weight/CAST(tqw.count AS float)) AS weight_sum,
+            --SUM(tqw.weight/CAST(tqw.count AS float)) AS weight_sum,
+            SUM(tqw.nweight) AS weight_sum,
             COUNT(tqw.target_id) AS target_count,
             (SELECT COUNT(id) FROM asklet_target WHERE domain_id = {domain_id}) AS total_count
     FROM    asklet_question AS q
@@ -403,8 +404,8 @@ LIMIT 1;
                 weights__id__isnull=False,
                 weights__target__in=targets).distinct()
         question_rankings = defaultdict(int) # {question:rank}
+        #TODO:support closed-world assumption by counting targets without explicit weight and assuming weight=-4?
         for question in splittable_questions.iterator():
-#            for target in targets:
             for weight in question.weights.all().iterator():
                 
                 #TODO:use raw weight?
@@ -889,17 +890,33 @@ class TargetQuestionWeight(models.Model):
         default=0,
         blank=False,
         null=False,
+        db_index=True,
         help_text=_('''
             A positive value indicates a YES belief in the association.
             A negative value indicates a NO belief in the association.'''))
     
     count = models.PositiveIntegerField(
         default=0,
+        db_index=True,
         blank=False,
         null=False)
     
+    nweight = models.FloatField(
+        blank=True,
+        null=True,
+        editable=False,
+        db_index=True)
+    
+    prob = models.FloatField(
+        blank=True,
+        null=True,
+        editable=False,
+        db_index=True)
+    
     @property
     def normalized_weight(self):
+        if not self.count:
+            return
         return self.weight/float(self.count)
     
     class Meta:
@@ -913,6 +930,18 @@ class TargetQuestionWeight(models.Model):
     
     def __str__(self):
         return u('%s %s = %s' % (self.target.slug, self.question.slug, self.weight))
+    
+    def save(self, *args, **kwargs):
+        
+        if self.count:
+            self.nweight = self.normalized_weight
+            assert c.NO <= self.nweight <= c.YES, 'Out-of-range weight: %s' % (self.nweight,)
+            self.prob = (self.nweight + c.YES)/float(c.YES - c.NO)
+        else:
+            self.prob = None
+            self.nweight = None
+        
+        super(TargetQuestionWeight, self).save(*args, **kwargs)
     
 class Answer(models.Model):
     """

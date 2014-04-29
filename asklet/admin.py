@@ -135,7 +135,8 @@ class TargetQuestionWeightAdmin(admin.ModelAdmin):
         'question',
         'weight',
         'count',
-        'normalized_weight',
+        #'normalized_weight',
+        'prob',
     )
     
     search_fields = (
