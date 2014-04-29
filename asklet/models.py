@@ -154,7 +154,7 @@ class Domain(models.Model):
         sql = """
 SELECT  s.id AS session_id,
         t.id AS target_id,
-        SUM(((CAST(tqw.weight AS float)/tqw.count)*a.answer-1+ABS((CAST(tqw.weight AS float)/tqw.count)*a.answer))/ABS((CAST(tqw.weight AS float)/tqw.count)*a.answer-1+ABS((CAST(tqw.weight AS float)/tqw.count)*a.answer))*ABS((CAST(tqw.weight AS float)/tqw.count)+a.answer)/2.) AS rank
+        SUM((tqw.nweight*a.answer-1+ABS(tqw.nweight*a.answer))/ABS(tqw.nweight*a.answer-1+ABS(tqw.nweight*a.answer))*ABS(tqw.nweight+a.answer)/2.) AS rank
 FROM    asklet_session as s
 LEFT OUTER JOIN asklet_answer AS a ON
         a.session_id = s.id
@@ -330,7 +330,6 @@ SELECT  m.question_id,
         m.total_count
 FROM (
     SELECT  q.id AS question_id,
-            --SUM(tqw.weight/CAST(tqw.count AS float)) AS weight_sum,
             SUM(tqw.nweight) AS weight_sum,
             COUNT(tqw.target_id) AS target_count,
             (SELECT COUNT(id) FROM asklet_target WHERE domain_id = {domain_id}) AS total_count
