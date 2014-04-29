@@ -9,7 +9,7 @@ from optparse import make_option
 from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import connection, reset_queries
-from django.db.transaction import commit_on_success
+from django.db.transaction import commit_on_success, commit_manually, commit, rollback
 from django.utils import timezone
 
 from six.moves import cPickle as pickle
@@ -18,7 +18,7 @@ from six.moves import input as raw_input
 from six import u
 
 from asklet import constants as c
-from asklet.utils import MatrixUser
+from asklet.utils import MatrixUser, DomainUser
 from asklet import models
 
 class Command(BaseCommand):
@@ -27,10 +27,11 @@ class Command(BaseCommand):
     option_list = BaseCommand.option_list + (
         make_option('--seed', default=None),
         make_option('--pause', action='store_true', default=False),
+        make_option('--dryrun', action='store_true', default=False),
         make_option('--verbose', action='store_true', default=False),
         make_option('--max-sessions', default=1000),
         make_option('--domain', default='test'),
-        make_option('--matrix', default='asklet/tests/fixtures/matrix.yaml'),
+        make_option('--matrix', default=''),
         )
     
     def print_(self, *args):
@@ -38,9 +39,12 @@ class Command(BaseCommand):
             sys.stdout.write(' '.join(map(str, args)))
             sys.stdout.write('\n')
     
+    @commit_manually
     def handle(self, *args, **options):
         if options['seed']:
             random.seed(int(options['seed']))
+        
+        self.dryrun = options['dryrun']
         
         domains = models.Domain.objects.all()
         self.domain = models.Domain.objects.get(slug=options['domain'])
@@ -51,7 +55,13 @@ class Command(BaseCommand):
         
         print_ = self.print_
         
-        self.user = MatrixUser(options['matrix'])
+        matrix = options['matrix']
+        if matrix:
+            if not os.path.isfile(matrix):
+                raise Exception('Missing matrix file: %s' % matrix)
+            self.user = MatrixUser(fn=matrix)
+        else:
+            self.user = DomainUser(domain=self.domain)
         
         self.progress = [] # [(winner, steps, datetime)]
         self.total_count = 0
@@ -60,6 +70,7 @@ class Command(BaseCommand):
         self.record_freq = 10
         tmp_debug = settings.DEBUG
         settings.DEBUG = False
+        win_history = []
         try:
             for i in xrange(self.max_sessions):
                 #self.pause = self.verbose = i+1 >= 500
@@ -69,14 +80,18 @@ class Command(BaseCommand):
                     sys.stdout.write('\rProcessing %i of %i. %i correct out of %i. %.02f sessions/sec' \
                         % (i+1, self.max_sessions, self.correct_count, self.total_count, sessions_per_sec))
                     sys.stdout.flush()
-                self.run_session(i)
+                winner = self.run_session(i)
+                win_history.append(int(winner or 0))
                 reset_queries()
         finally:
             settings.DEBUG = tmp_debug
         print('')
+#        print('win history:',win_history)
         print('Done!')
+        
+        if self.dryrun:
+            rollback()
     
-    @commit_on_success
     def run_session(self, i):
         print_ = self.print_
         domain = self.domain
@@ -96,59 +111,68 @@ class Command(BaseCommand):
         user.think_of_something()
         print_('User thinks of %s.' % user.target)
         
-        prior_question_slugs = set()
-        for j in xrange(domain.max_questions):
-            guess = None
-            things = []
-            print_('-'*80)
-            print_('Question %i' % (j+1,))
-            q = session.get_next_question(verbose=self.verbose)
-            if q is None:
-                print_('System: I give up. What was it?')
-                print_('User: %s' % user.target)
-                print_('System: Please describe three things about it.')
-#                domain_question_count = session.domain.questions.all().count()
-                session_question_count = session.question_count()
-#                print('')
-#                print('domain_question_count:',domain_question_count)
-#                print('session_question_count:',session_question_count)
-                assert session_question_count >= session.minimum_question_count, \
-                    'Stopped before max_questions reached: %s' % (session_question_count,)
-                things = user.describe(3, exclude=prior_question_slugs)
-                self.progress.append((False, j, timezone.now()))
-                if self.pause: raw_input('enter')
-                break
-            elif isinstance(q, models.Question):
-                print_('System: %s?' % q.slug)
-                answer = user.ask(q.slug)
-                print_('User: %s' % answer)
-                print_('User is thinking %s.' % user.target)
-                models.Answer.objects.create(session=session, question=q, answer=answer)
-                if self.pause: raw_input('enter')
-            elif isinstance(q, models.Target):
-                guess = q
-                print_('System: Are you thinking %s?' % q.slug)
-                correct = user.is_it(target=q.slug)
-                self.correct_count += correct
-                print_('User: %s' % correct)
-                print_('guess:',guess)
-                prior_identical_guesses = models.Answer.objects.filter(session=session, guess=guess)
-                assert prior_identical_guesses.count() == 0, \
-                    '%i prior identical guesses' % (prior_identical_guesses.count(),)
-                models.Answer.objects.get_or_create(
-                    session=session,
-                    guess=q,
-                    defaults=dict(answer=c.YES if correct else c.NO))
-                if correct:
-                    print_('System: Horray!')
-                    self.progress.append((True, j, timezone.now()))
+        winner = None
+        try:
+            prior_question_slugs = set()
+            for j in xrange(domain.max_questions):
+                guess = None
+                things = []
+                print_('-'*80)
+                print_('Question %i' % (j+1,))
+                q = session.get_next_question(verbose=self.verbose)
+                if q is None:
+                    print_('System: I give up. What was it?')
+                    print_('User: %s' % user.target)
+                    print_('System: Please describe three things about it.')
+    #                domain_question_count = session.domain.questions.all().count()
+                    session_question_count = session.question_count()
+    #                print('')
+    #                print('domain_question_count:',domain_question_count)
+    #                print('session_question_count:',session_question_count)
+                    assert session_question_count >= session.minimum_question_count, \
+                        'Stopped before max_questions reached: %s' % (session_question_count,)
+                    things = user.describe(3, exclude=prior_question_slugs)
+                    self.progress.append((False, j, timezone.now()))
                     if self.pause: raw_input('enter')
+                    winner = False
                     break
-                else:
-                    print_('System: Aw shucks!')
+                elif isinstance(q, models.Question):
+                    print_('System: %s?' % q.slug)
+                    answer = user.ask(q.slug)
+                    print_('User: %s' % answer)
+                    print_('User is thinking %s.' % user.target)
+                    models.Answer.objects.create(session=session, question=q, answer=answer)
                     if self.pause: raw_input('enter')
-            else:
-                raise Exception('Unknown type: %s' % (q,))
+                elif isinstance(q, models.Target):
+                    guess = q
+                    print_('System: Are you thinking %s?' % q.slug)
+                    winner = correct = user.is_it(target=q.slug)
+                    self.correct_count += correct
+                    print_('User: %s' % correct)
+                    print_('guess:',guess)
+                    prior_identical_guesses = models.Answer.objects.filter(session=session, guess=guess)
+                    assert prior_identical_guesses.count() == 0, \
+                        '%i prior identical guesses' % (prior_identical_guesses.count(),)
+                    models.Answer.objects.get_or_create(
+                        session=session,
+                        guess=q,
+                        defaults=dict(answer=c.YES if correct else c.NO))
+                    if correct:
+                        print_('System: Horray!')
+                        self.progress.append((True, j, timezone.now()))
+                        if self.pause: raw_input('enter')
+                        break
+                    else:
+                        print_('System: Aw shucks!')
+                        if self.pause: raw_input('enter')
+                else:
+                    raise Exception('Unknown type: %s' % (q,))
+                
+            session.record_result(guess=guess, actual=user.target, merge=True, attrs=things)
             
-        session.record_result(guess=guess, actual=user.target, merge=True, attrs=things)
+        finally:
+            if not self.dryrun:
+                commit()
         
+        return winner
+    

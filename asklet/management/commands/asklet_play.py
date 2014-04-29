@@ -92,9 +92,10 @@ class Command(BaseCommand):
 
     def admit_defeat(self):
         while 1:
-            target = sterialize(raw_input('I give up, what were you thinking? '))
-            if target:
-                target, _ = models.Target.objects.get_or_create(domain=self.domain, slug=target)
+            #target = sterialize(raw_input('I give up, what were you thinking? '))
+            target_slug = raw_input('I give up, what were you thinking? ').strip()
+            if target_slug:
+                target, _ = models.Target.objects.get_or_create(domain=self.domain, slug=target_slug)
                 self.session.target = target
                 self.session.winner = False
                 self.session.save()

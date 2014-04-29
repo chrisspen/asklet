@@ -5,6 +5,7 @@ import uuid
 import yaml
 
 from six.moves import input as raw_input
+from six import string_types as basestring
 
 from . import constants as c
 
@@ -17,6 +18,8 @@ def is_int(s):
     try:
         int(s)
         return True
+    except ValueError:
+        return False
     except TypeError:
         return False
 
@@ -92,6 +95,53 @@ class MatrixUser(BaseUser):
         #attrs = sorted(attrs, key=lambda k: self.data[self.target][k], reverse=True)
         attrs = attrs[:n]
         return [(_, self.data[self.target][_]) for _ in attrs]
+
+class DomainUser(BaseUser):
+    """
+    An automated user whose knowledge is contained in a domain.
+    Designed to test the accuracy of a domain by having the system play itself.
+    """
+    
+    def __init__(self, domain):
+        super(BaseUser, self).__init__()
+        self.domain = domain
+        assert domain.targets.all().count(), \
+            'DomainUser requires a domain with at least one target.'
+        
+    def think_of_something(self):
+        """
+        Randomly choices a target for the system to guess.
+        """
+        self.target = self.domain.targets.all().order_by('?')[0]
+        
+    def ask(self, question_slug):
+        """
+        Returns the user's belief in the question's relation
+        to our secret target.
+        """
+        question = self.domain.questions.filter(slug=question_slug)[0]
+        nweight = self.domain.get_weight(
+            target=self.target,
+            question=question,
+            normalized=True)
+        return nweight
+    
+    def is_it(self, target):
+        """
+        Confirms or denies whether or not the given target is the one we chose.
+        """
+        from .models import Target
+        if isinstance(target, basestring):
+            target = self.domain.targets.filter(slug=target)[0]
+        assert isinstance(target, Target)
+        return self.target == target
+    
+    def describe(self, n, exclude=set()):
+        """
+        Returns 3 random attributes of our target.
+        """
+        # There's no point in telling ourselves N things we already know.
+        return []
 
 class ShellUser(BaseUser):
     """
@@ -177,6 +227,8 @@ class ShellUser(BaseUser):
         print('Please describe %i things about this.' % n)
         while len(things) < n:
             response = raw_input('<thing> <weight>').strip()
+            if not response:
+                break
             #response = sterialize(response)
             parts = response.split(' ')
             if parts:

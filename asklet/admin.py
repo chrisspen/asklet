@@ -31,6 +31,7 @@ class DomainAdmin(admin.ModelAdmin):
         'accuracy_history',
         'targets_count',
         'question_count',
+        'session_count',
     )
     
     def connectivity_str(self, obj):
@@ -52,6 +53,13 @@ class DomainAdmin(admin.ModelAdmin):
         return '<a href="/admin/asklet/question/?domain=%i" class="button" target="_blank">View %i</a>' % (obj.id, obj.questions.all().count(),)
     question_count.short_description = 'questions'
     question_count.allow_tags = True
+    
+    def session_count(self, obj):
+        if not obj:
+            return 0
+        return '<a href="/admin/asklet/session/?domain=%i" class="button" target="_blank">View %i</a>' % (obj.id, obj.sessions.all().count(),)
+    session_count.short_description = 'sessions'
+    session_count.allow_tags = True
 
 admin.site.register(models.Domain, DomainAdmin)
 

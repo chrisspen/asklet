@@ -150,7 +150,13 @@ class Tests(TestCase):
         self.assertEqual(domains.count(), 1)
         domain_name = 'test'
         
-        call_command('asklet_simulate', max_sessions=150, domain=domain_name, verbose=0, seed=0)
+        call_command(
+            'asklet_simulate',
+            max_sessions=150,
+            domain=domain_name,
+            matrix='asklet/tests/fixtures/matrix.yaml',
+            verbose=0,
+            seed=0)
         
         domain = models.Domain.objects.get(slug=domain_name)
         history = domain.accuracy_history()
@@ -164,22 +170,59 @@ class Tests(TestCase):
         """
         settings.ASKLET_RANKER = c.SQL
         
+        matrix_fn = 'asklet/tests/fixtures/matrix.yaml'
+        max_sessions = 150
+        
         domains = models.Domain.objects.all()
         self.assertEqual(domains.count(), 1)
-        domain_name = 'test'
         
+        # Set domain to use CWA.
+        domain_name = 'test'
+        domain = models.Domain.objects.get(slug=domain_name)
+        domain.assumption = c.CLOSED
+        domain.save()
+        
+        # Simulate domain using the CWA.
+        random.seed(0)
         call_command(
             'asklet_simulate',
-            max_sessions=150,
+            max_sessions=max_sessions,
             domain=domain_name,
+            matrix=matrix_fn,
             verbose=0,#enable for debugging messages
             seed=0)
-        
         domain = models.Domain.objects.get(slug=domain_name)
         history = domain.accuracy_history()
-        #print('history:',history)
+        print('cwa history:',history)
         self.assertEqual(history[-1], 1.0)
         
+        # Reset domain.
+        domain.purge(verbose=1)
+        self.assertEqual(domain.sessions.all().count(), 0)
+        self.assertEqual(domain.targets.all().count(), 0)
+        self.assertEqual(domain.questions.all().count(), 0)
+        self.assertEqual(domain.weights.count(), 0)
+        
+        # Change domain to use OWA.
+        models.Domain.objects.update()
+        domain = models.Domain.objects.get(slug=domain_name)
+        domain.assumption = c.OPEN
+        domain.save()
+        
+        # Simulate domain using the OWA.
+        random.seed(0)
+        call_command(
+            'asklet_simulate',
+            max_sessions=max_sessions,
+            domain=domain_name,
+            matrix=matrix_fn,
+            verbose=0,#enable for debugging messages
+            seed=0)
+        domain = models.Domain.objects.get(slug=domain_name)
+        history = domain.accuracy_history()
+        print('owa history:',history)
+        self.assertEqual(history[-1], 1.0)
+    
     def test_numpy(self):
         import pickle
         import numpy as np
@@ -232,3 +275,43 @@ class Tests(TestCase):
             #print(them, us, agg1, agg2)
             self.assertEqual(agg1, agg2)
             
+    def test_domainuser(self):
+        """
+        Confirms the system can learn a toy knowledgebase from scratch.
+        Should obtain 100% accuracy within the first 100 sessions.
+        """
+        settings.ASKLET_RANKER = c.SQL
+        matrix_fn = 'asklet/tests/fixtures/matrix.yaml'
+        max_sessions = 150
+        domain_name = 'test'
+        
+        # Train the domain on a matrix.
+        domains = models.Domain.objects.all()
+        self.assertEqual(domains.count(), 1)
+        domain = models.Domain.objects.get(slug=domain_name)
+        domain.assumption = c.OPEN
+        domain.save()
+        random.seed(0)
+        call_command(
+            'asklet_simulate',
+            max_sessions=max_sessions,
+            domain=domain_name,
+            matrix=matrix_fn,
+            verbose=0,#enable for debugging messages
+            seed=0)
+        
+        # Test the domain against itself.
+        domain.sessions.all().delete()
+        random.seed(0)
+        call_command(
+            'asklet_simulate',
+            max_sessions=50,
+            domain=domain_name,
+            verbose=0,#enable for debugging messages
+            seed=0)
+        
+        domain = models.Domain.objects.get(slug=domain_name)
+        history = domain.accuracy_history()
+        #print('history:',history)
+        self.assertEqual(history[-1], 1.0)
+        

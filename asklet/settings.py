@@ -9,7 +9,10 @@ settings.ASKLET_BACKEND = getattr(
     c.SQL)
 
 # What mechanism we use to calculate ranks.
+# Dependent on backend.
 settings.ASKLET_RANKER = getattr(
     settings,
     'ASKLET_RANKER',
-    c.PYTHON)
+    #c.PYTHON,
+    c.SQL,#Only available with SQL backend.
+)
