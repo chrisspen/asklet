@@ -70,6 +70,15 @@ class Domain(models.Model):
         help_text=_('''If a target is the top-ranked choice for this many
             iterations, it will be used as a guess.'''))
     
+    #TODO:support
+    assumption = models.CharField(
+        max_length=25,
+        blank=False,
+        null=False,
+        db_index=True,
+        choices=c.ASSUMPTION_CHOICES,
+        default=c.CLOSED)
+    
     def __unicode__(self):
         return self.slug
     

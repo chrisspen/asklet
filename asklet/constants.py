@@ -35,3 +35,11 @@ RANKERS = (
     SQL,
     PYTHON,
 )
+
+CLOSED = 'closed'
+OPEN = 'open'
+
+ASSUMPTION_CHOICES = (
+    (CLOSED, 'closed'),
+    (OPEN, 'open'),
+)
