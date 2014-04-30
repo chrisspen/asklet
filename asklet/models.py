@@ -197,7 +197,15 @@ class Domain(models.Model):
         ranker = settings.ASKLET_RANKER.lower()
         return getattr(self, 'rank_targets_%s' % ranker)(*args, **kwargs)
     
-    def _query_targetrankings(self, session_id, question_ids=[], exclude_target_ids=[], only_target_ids=[], verbose=0, limit=1000):
+    def _query_targetrankings(self,
+        session_id,
+        question_ids=[],
+        exclude_target_ids=[],
+        only_target_ids=[],
+        verbose=0,
+        limit=1000,
+        order_by=True,
+        as_sql=False):
         
         question_ids_str = ''
         if question_ids:
@@ -214,7 +222,6 @@ class Domain(models.Model):
         #TODO:apply world-assumption to SUM(), if weight missing, insert *WA_WEIGHT
         # Note, see calculate_target_rank_item2() for the explanation of the rank formula.
         #sqlite/postgresql/mysql=coalesce
-        cursor = connection.cursor()
 #        sql = """
 #SELECT  s.id AS session_id,
 #        t.id AS target_id,
@@ -267,8 +274,8 @@ FROM (
         {only_target_ids_str}
 ) AS m
 GROUP BY m.session_id, m.target_id
-ORDER BY rank DESC
-LIMIT {limit};
+{order_by_str}
+{limit_str}
         """.format(
             session_id=session_id,
             domain_id=self.id,
@@ -276,9 +283,13 @@ LIMIT {limit};
             question_ids_str=question_ids_str,
             exclude_target_ids_str=exclude_target_ids_str,
             only_target_ids_str='',#only_target_ids_str,#TODO:re-enable?
-            limit=limit,
+            order_by_str='ORDER BY rank DESC' if order_by else '',
+            limit_str=('LIMIT %i' % limit) if limit else '',
         )
         if verbose: print('target sql:',sql)
+        if as_sql:
+            return sql
+        cursor = connection.cursor()
         cursor.execute(sql)
         return cursor
     
@@ -460,6 +471,7 @@ LIMIT {limit};
 #ORDER BY weight_sum_abs ASC
 #LIMIT 1;
 #        """.format(
+
         sql = """
 SELECT  m.question_id,
         ABS(m.weight_sum + (({total_target_count} - m.target_count)*{missing_weight})) AS weight_sum_abs,
@@ -495,12 +507,68 @@ WHERE m.weight_sum IS NOT NULL
 ORDER BY weight_sum_abs ASC
 LIMIT 1;
         """.format(
+
+        #TODO:This is an attempt to use the current target rank to improve
+        # the question rank. e.g. If a target is ranked highly, then recommend
+        # questions likely to confirm or deny it.
+        # It seems to have no effect on the learning rate
+        # of the test dataset, but does reduce speed by about 1 session/sec.
+#        sub_sql = self._query_targetrankings(
+#            session_id=session_id,
+#            only_target_ids=only_target_ids,
+#            verbose=verbose,
+#            limit=0,
+#            order_by=False,
+#            as_sql=True)#session_id, target_id, rank
+#        sql = """
+#SELECT  m.question_id,
+#        ABS(m.weight_sum + (({total_target_count} - m.target_count)*{missing_weight})) AS weight_sum_abs,
+#        m.weight_sum,
+#        m.target_count
+#FROM (
+#    SELECT  q.id AS question_id,
+#    
+#            -- TODO:is this correct?
+#            -- SUM(tqw.nweight) AS weight_sum,
+#            --SUM(COALESCE(a.answer, tqw.nweight)) AS weight_sum,
+#            SUM(COALESCE(a.answer, tr.rank)) AS weight_sum,
+#            
+#            COUNT(DISTINCT tqw.target_id) AS target_count
+#    FROM    asklet_question AS q
+#    LEFT OUTER JOIN
+#            asklet_targetquestionweight AS tqw ON
+#            tqw.question_id = q.id
+#        AND tqw.weight IS NOT NULL
+#    LEFT OUTER JOIN
+#            asklet_session AS s ON
+#            s.id = {session_id}
+#    LEFT OUTER JOIN
+#            asklet_answer AS a ON
+#            a.session_id = s.id
+#        AND a.question_id = tqw.question_id
+#    LEFT OUTER JOIN (
+#        {sub_sql} -- session_id, target_id, rank
+#    ) AS tr ON
+#            tr.session_id = s.id
+#        AND tr.target_id = tqw.target_id
+#    WHERE   q.enabled = CAST(1 AS bool)
+#        AND q.domain_id = {domain_id}
+#        {only_target_ids_str}
+#        {exclude_question_ids_str}
+#    GROUP BY q.id
+#) AS m
+#WHERE m.weight_sum IS NOT NULL
+#ORDER BY weight_sum_abs ASC
+#LIMIT 1;
+#        """.format(
+
             domain_id=self.id,
             session_id=session_id,
             total_target_count=total_target_count,
             missing_weight=self.assumption_weight,
             only_target_ids_str='',#only_target_ids_str,#TODO:re-enable?
             exclude_question_ids_str=exclude_question_ids_str,
+#            sub_sql=sub_sql,
         )
         if verbose: print('question sql:',sql)
         cursor.execute(sql)

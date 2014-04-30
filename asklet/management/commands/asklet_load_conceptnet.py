@@ -92,6 +92,7 @@ class Command(BaseCommand):
     @commit_on_success
     def handle(self, *args, **options):
         tmp_settings = settings.DEBUG
+        #TODO:auto-download ConceptNet csv file?
         try:
             domain = models.Domain.objects.get(slug=options['domain'])
             fn = options['fn'].strip()
@@ -104,11 +105,12 @@ class Command(BaseCommand):
             
             print('Counting total lines...')
             total = 0
-            total = 9855250
-    #        for member in tar:
-    #            print(member)
-    #            fin = tar.extractfile(member)
-    #            total += fin.read().decode('utf8').count('\n')
+#            total = 9855250
+            for member in tar:
+                print(member)
+                fin = tar.extractfile(member)
+                total += fin.read().decode('utf8').count('\n')
+            #TODO:record line on domain so we can skip if interrupted
             print('%i total lines found.' % total)
     #        return
             
