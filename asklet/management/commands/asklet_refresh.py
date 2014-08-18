@@ -54,14 +54,41 @@ class Command(BaseCommand):
             for tqw in tqw_probs.iterator():
                 i += 1
                 if i == 1 or not i % 100 or i == total:
-                    sys.stdout.write('\rProcessing weight %i of %i %.02f%%.' % (i, total, i/float(total)*100))
+                    sys.stdout.write('\rProcessing weight %i of %i %.02f%%.' \
+                        % (i, total, i/float(total)*100))
                     sys.stdout.flush()
+                    if not dryrun:
+                        commit()
                 tqw.save()
-            print('\nDone.')
-            
-            if not dryrun:
-                commit()
+        
+            targets = domain.targets.filter(language__isnull=True)
+            total = targets.count()
+            i = 0
+            for r in targets.iterator():
+                i += 1
+                if i == 1 or not i % 100 or i == total:
+                    sys.stdout.write('\rProcessing target %i of %i %.02f%%.' \
+                        % (i, total, i/float(total)*100))
+                    sys.stdout.flush()
+                    if not dryrun:
+                        commit()
+                r.save()
+                
+            questions = domain.questions.filter(language__isnull=True)
+            total = questions.count()
+            i = 0
+            for r in questions.iterator():
+                i += 1
+                if i == 1 or not i % 100 or i == total:
+                    sys.stdout.write('\rProcessing question %i of %i %.02f%%.' \
+                        % (i, total, i/float(total)*100))
+                    sys.stdout.flush()
+                    if not dryrun:
+                        commit()
+                r.save()
         
         if dryrun:
             raise Exception
+            
+        print('\nDone.')
         

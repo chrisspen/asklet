@@ -13,6 +13,12 @@ u = six.u
 unicode = six.text_type
 basestring = six.string_types
 
+from conceptnet5.util.language_codes import CODE_TO_ENGLISH_NAME, SUPPORTED_LANGUAGE_CODES
+LANGUAGE_CHOICES = sorted([
+    (code, CODE_TO_ENGLISH_NAME[code])
+    for code in SUPPORTED_LANGUAGE_CODES
+], key=lambda o: o[1])
+
 from . import constants as c
 from . import settings as _settings
 from .backends.sql import SQLBackend
@@ -87,6 +93,27 @@ class Domain(models.Model):
             If "open", the weight is assumed to be {open}.
             If "closed", the weight is assumed to be {closed}.'''\
             .format(open=c.OWA_WEIGHT, closed=c.CWA_WEIGHT)))
+    
+    language = models.CharField(
+        max_length=2,
+        blank=True,
+        null=True,
+        choices=LANGUAGE_CHOICES,
+        help_text=_('If specified, only edges in this language will be used.'))
+    
+    allow_inference = models.BooleanField(
+        default=False,
+        help_text=_('''If checked, and inference rule are specified,
+            additional edges may be generated according to those rules.'''))
+    
+    max_inference_depth = models.PositiveIntegerField(
+        default=5,
+        help_text=_('''The maximum number of recursive inferences to make.'''))
+    
+    min_inference_probability = models.FloatField(
+        default=0.1,
+        help_text=_('''The minimum probability necessary to trigger
+        an inference.'''))
     
     def __unicode__(self):
         return self.slug
@@ -194,6 +221,14 @@ class Domain(models.Model):
         return self.assumption_weight
     
     def rank_targets(self, *args, **kwargs):
+        """
+        Returns a list of targets ordered from most likely being the
+        user's choice.
+        
+        Calls the appropriate backend ranker to do the actual calculation.
+        Based on domain size, choice of backend can drastically effect
+        performance.
+        """
         ranker = settings.ASKLET_RANKER.lower()
         return getattr(self, 'rank_targets_%s' % ranker)(*args, **kwargs)
     
@@ -713,15 +748,18 @@ class Session(models.Model):
         return u('user %s in domain %s' % (self.user or self.user_uuid, self.domain))
     
     def get_top_targets_cache(self):
+        #TODO:save to filesystem cache keyed by session id
         prior_top_target_ids = []
         if hasattr(self, '_cached_prior_top_target_ids'):
             prior_top_target_ids = self._cached_prior_top_target_ids
         return prior_top_target_ids
         
     def clear_top_targets_cache(self):
+        #TODO:save to filesystem cache keyed by session id
         self._cached_prior_top_target_ids = []
     
     def save_top_targets_cache(self, lst):
+        #TODO:save to filesystem cache keyed by session id
         self._cached_prior_top_target_ids = lst
     
     def get_target_rankings_cache(self):
@@ -767,7 +805,7 @@ class Session(models.Model):
         #TODO:cache, so we don't have to iterate over millions of targets each time
         #TODO:use a priority-dictionary?
         if verbose:
-            print('prior_top_target_ids:',prior_top_target_ids)
+            print('prior_top_target_ids:',len(prior_top_target_ids))
             print('Prior answers:')
             for answer in answers:
                 if answer.question:
@@ -835,11 +873,15 @@ class Session(models.Model):
         unguessed_targets = self.domain.targets.filter(enabled=True).exclude(id__in=prior_failed_target_ids).exists()
 #        print('unguessed_targets:',unguessed_targets)
         
+        # Check for cases where we want to guess the target instead
+        # of asking a question.
         if last_top_targets_n and len(last_top_targets) >= last_top_targets_n \
         and len(set(last_top_targets[-last_top_targets_n:])) == 1:
-            # If the last N top targets are all the same, then guess that target.
+            # If the last N top targets are all the same, then guess that
+            # target.
             top_target = last_top_targets[-1]
-            # Clear the cached list, so if we're wrong, we won't re-recommend the same target.
+            # Clear the cached list, so if we're wrong, we won't re-recommend
+            # the same target.
             self._cached_last_top_targets = []
             self.clear_top_targets_cache()
             if verbose: print('top_target case 1:',top_target)
@@ -850,6 +892,8 @@ class Session(models.Model):
             if verbose: print('top_target case 2:',top_targets)
             return
         elif len(top_targets) == 1:
+            # If there's only one target left, then forego futher questions
+            # and just guess that target.
             self.clear_top_targets_cache()
             top_target = top_targets[0][0]
             if verbose: print('top_target case 3:',top_target)
@@ -975,6 +1019,18 @@ class Session(models.Model):
             
         self.merged = True
 
+SET_TARGET_INDEX = True
+
+def extract_language_code(s):
+    if not s:
+        return
+    parts = s.strip().split('/')
+    if len(parts) < 4:
+        return
+    elif len(parts[2]) != 2:
+        return
+    return parts[2]
+
 class Target(models.Model):
     """
     Things to guess.
@@ -982,15 +1038,22 @@ class Target(models.Model):
     
     domain = models.ForeignKey(Domain, related_name='targets')
     
-    slug = models.SlugField(
+    slug = models.CharField(
         max_length=500,
         blank=False,
         null=False,
         db_index=True)
     
+    text = models.TextField(
+        blank=True,
+        null=True,
+        help_text=_('A user-friendly presentation of the question.'))
+        
     index = models.PositiveIntegerField(
-        default=0,
+        default=None,
         editable=False,
+        blank=True,
+        null=True,
         db_index=True)
 
     conceptnet_subject = models.CharField(
@@ -999,6 +1062,13 @@ class Target(models.Model):
         blank=True,
         null=True,
         help_text=_('The URI of the subject in ConceptNet5.'))
+    
+    language = models.CharField(
+        max_length=2,
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False)
     
     enabled = models.BooleanField(
         default=False,
@@ -1017,9 +1087,19 @@ class Target(models.Model):
     def __str__(self):
         return u(self.slug)
     
-    def save(self, *args, **kwargs):
-        if not self.id:
+    def language_name(self):
+        if not self.language:
+            return
+        return CODE_TO_ENGLISH_NAME[self.language]
+    language_name.short_description = 'language'
+    
+    def save(self, set_index=True, *args, **kwargs):
+        if not self.id and set_index and SET_TARGET_INDEX:
             self.index = self.domain.targets.all().only('id').count()
+            
+        if not self.language:
+            self.language = extract_language_code(self.conceptnet_subject)
+            
         super(Target, self).save(*args, **kwargs)
 
 class QuestionManager(models.Manager):
@@ -1028,6 +1108,8 @@ class QuestionManager(models.Manager):
         if q is None:
             q = self
         return q.filter(enabled=True)
+
+SET_QUESTION_INDEX = True
 
 class Question(models.Model):
     """
@@ -1038,7 +1120,7 @@ class Question(models.Model):
     
     domain = models.ForeignKey(Domain, related_name='questions')
     
-    slug = models.SlugField(
+    slug = models.CharField(
         max_length=500,
         blank=False,
         null=False,
@@ -1050,8 +1132,10 @@ class Question(models.Model):
         help_text=_('A user-friendly presentation of the question.'))
     
     index = models.PositiveIntegerField(
-        default=0,
+        default=None,
         editable=False,
+        blank=True,
+        null=True,
         db_index=True)
     
     conceptnet_predicate = models.CharField(
@@ -1068,6 +1152,13 @@ class Question(models.Model):
         null=True,
         help_text=_('The URI of the object in ConceptNet5.'))
     
+    language = models.CharField(
+        max_length=2,
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False)
+        
     enabled = models.BooleanField(
         default=False,
         db_index=True,
@@ -1088,13 +1179,26 @@ class Question(models.Model):
     def __str__(self):
         #return u(self.text or self.slug)
         return self.slug
+        
+    def language_name(self):
+        if not self.language:
+            return
+        return CODE_TO_ENGLISH_NAME[self.language]
+    language_name.short_description = 'language'
     
-    def save(self, *args, **kwargs):
-        if not self.id:
+    def save(self, set_index=True, *args, **kwargs):
+        if not self.id and set_index and SET_QUESTION_INDEX:
             self.index = self.domain.questions.all().only('id').count()
+            
+        if not self.language:
+            self.language = extract_language_code(self.conceptnet_object)
+            
         super(Question, self).save(*args, **kwargs)
 
 class TargetQuestionWeight(models.Model):
+    """
+    Represents the association between a target and question.
+    """
     
     target = models.ForeignKey(
         Target,
@@ -1117,19 +1221,24 @@ class TargetQuestionWeight(models.Model):
         default=0,
         db_index=True,
         blank=False,
-        null=False)
+        null=False,
+        help_text=_('The total number of votes on this weight.'))
     
     nweight = models.FloatField(
         blank=True,
         null=True,
+        verbose_name=_('normalized weight'),
         editable=False,
-        db_index=True)
+        db_index=True,
+        help_text=_('Normalized weight value. Equivalent to weight/count.'))
     
     prob = models.FloatField(
         blank=True,
         null=True,
+        verbose_name=_('probability'),
         editable=False,
-        db_index=True)
+        db_index=True,
+        help_text=_('The normalized weight scaled to [0:1].'))
     
     @property
     def normalized_weight(self):
@@ -1145,6 +1254,9 @@ class TargetQuestionWeight(models.Model):
             ('target', 'question', 'weight'),
         )
         ordering = ('-weight',)
+    
+    def __unicode__(self):
+        return u'%s %s = %s' % (self.target.slug, self.question.slug, self.weight)
     
     def __str__(self):
         return u('%s %s = %s' % (self.target.slug, self.question.slug, self.weight))
@@ -1225,4 +1337,64 @@ class Answer(models.Model):
             if self.question and not self.question_text:
                 self.question_text = self.question.slug
         super(Answer, self).save(*args, **kwargs)
+
+class FileImport(models.Model):
+    
+    domain = models.ForeignKey(Domain, related_name='file_imports')
+    
+    filename = models.CharField(
+        max_length=200,
+        blank=False,
+        null=False)
+        
+    part = models.CharField(
+        max_length=200,
+        blank=False,
+        null=False)
+    
+    current_line = models.PositiveIntegerField(
+        blank=True,
+        null=True)
+    
+    total_lines = models.PositiveIntegerField(
+        blank=True,
+        null=True)
+    
+    complete = models.BooleanField(
+        default=False,
+        editable=False,
+        db_index=True)
+    
+    @property
+    def done(self):
+        return self.total_lines and self.current_line == self.total_lines
+    
+    @property
+    def percent(self):
+        if not self.total_lines:
+            return
+        if self.current_line is None:
+            return
+        return self.current_line/float(self.total_lines)*100
+        
+    def percent_str(self):
+        percent = self.percent
+        if percent is None:
+            return
+        return '%.02f%%' % percent
+    percent_str.short_description = 'percent'
+    
+    class Meta:
+        unique_together = (
+            ('domain', 'filename', 'part'),
+        )
+        ordering = ('domain', 'filename', 'part')
+    
+    def save(self, *args, **kwargs):
+        
+        self.complete = False
+        if self.total_lines:
+            self.complete = self.total_lines == self.current_line
+        
+        super(FileImport, self).save(*args, **kwargs)
         

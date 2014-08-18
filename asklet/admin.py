@@ -8,12 +8,17 @@ from django.utils.translation import (
 
 from . import models
 
-#try:
-#    from admin_steroids.queryset import ApproxCountQuerySet
-#except ImportError:
+try:
+    from admin_steroids.options import BetterRawIdFieldsModelAdmin
+    
+    class ModelAdmin(BetterRawIdFieldsModelAdmin):
+        pass
+    
+except ImportError:
+    ModelAdmin = admin.ModelAdmin
 #    ApproxCountQuerySet = None
 
-class DomainAdmin(admin.ModelAdmin):
+class DomainAdmin(ModelAdmin):
     
     list_display = (
         'id',
@@ -35,7 +40,7 @@ class DomainAdmin(admin.ModelAdmin):
     )
     
     def connectivity_str(self, obj):
-        if not obj:
+        if not obj or obj.connectivity is None:
             return
         return '%.06f' % obj.connectivity
     connectivity_str.short_description = 'connectivity'
@@ -63,11 +68,12 @@ class DomainAdmin(admin.ModelAdmin):
 
 admin.site.register(models.Domain, DomainAdmin)
 
-class TargetAdmin(admin.ModelAdmin):
+class TargetAdmin(ModelAdmin):
     
     list_display = (
         'id',
         'slug',
+        'language_name',
         'index',
         'domain',
         'weights_count',
@@ -88,6 +94,7 @@ class TargetAdmin(admin.ModelAdmin):
     
     readonly_fields = (
         'weights_count',
+        'language_name',
     )
     
     def weights_count(self, obj):
@@ -99,11 +106,12 @@ class TargetAdmin(admin.ModelAdmin):
     
 admin.site.register(models.Target, TargetAdmin)
 
-class QuestionAdmin(admin.ModelAdmin):
+class QuestionAdmin(ModelAdmin):
     
     list_display = (
         'id',
         'slug',
+        'language_name',
         'index',
         'domain',
         'weights_count',
@@ -124,6 +132,7 @@ class QuestionAdmin(admin.ModelAdmin):
     
     readonly_fields = (
         'weights_count',
+        'language_name',
     )
     
     def weights_count(self, obj):
@@ -135,7 +144,7 @@ class QuestionAdmin(admin.ModelAdmin):
     
 admin.site.register(models.Question, QuestionAdmin)
 
-class TargetQuestionWeightAdmin(admin.ModelAdmin):
+class TargetQuestionWeightAdmin(ModelAdmin):
     
     list_display = (
         'id',
@@ -188,7 +197,7 @@ class AnswerInline(admin.TabularInline):
     
     max_num = 0
 
-class SessionAdmin(admin.ModelAdmin):
+class SessionAdmin(ModelAdmin):
     
     list_display = (
         'id',
@@ -225,3 +234,27 @@ class SessionAdmin(admin.ModelAdmin):
         return True
     
 admin.site.register(models.Session, SessionAdmin)
+
+class FileImportAdmin(ModelAdmin):
+    
+    list_display = (
+        'domain',
+        'filename',
+        'part',
+        'current_line',
+        'total_lines',
+        'percent_str',
+        'complete',
+    )
+    
+    list_filter = (
+        'complete',
+    )
+    
+    readonly_fields = (
+        'percent_str',
+        'complete',
+    )
+    
+admin.site.register(models.FileImport, FileImportAdmin)
+
