@@ -20,7 +20,7 @@ def get_reqs(testing=False):
             # Used for locally testing with a "real" database.
             'psycopg2>=2.5.2',
             'South>=0.8.4',
-            'scipy>=0.13.3',
+            'scipy',
             
             # Used for plotting performance graphs.
             #'matplotlib>=1.3.1',
@@ -96,7 +96,7 @@ setup(
         'Operating System :: OS Independent',
         'Programming Language :: Python',
         'Programming Language :: Python :: 2.7',
-        'Programming Language :: Python :: 3.2',
+        #'Programming Language :: Python :: 3.2',#TODO
         'Framework :: Django',
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
     ],

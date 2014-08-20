@@ -1129,7 +1129,7 @@ class Target(models.Model):
         return self.slug
     
     def __str__(self):
-        return u(self.slug)
+        return self.slug
     
     def language_name(self):
         if not self.language:
@@ -1586,7 +1586,7 @@ class TargetQuestionWeight(models.Model):
         return u'%s %s = %s' % (self.target.slug, self.question.slug, self.weight)
     
     def __str__(self):
-        return u('%s %s = %s' % (self.target.slug, self.question.slug, self.weight))
+        return '%s %s = %s' % (self.target.slug, self.question.slug, self.weight)
     
     def vote(self, value, save=True):
         assert c.NO <= value <= c.YES
