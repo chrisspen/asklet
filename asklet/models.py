@@ -1,9 +1,11 @@
 import random
+import re
 import sys
 from collections import defaultdict
 
 from django.db import models, connection
 from django.db.transaction import commit_on_success, commit_manually, commit
+from django.db.models import Min, Max
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.utils.translation import ugettext_lazy as _
@@ -18,6 +20,8 @@ LANGUAGE_CHOICES = sorted([
     (code, CODE_TO_ENGLISH_NAME[code])
     for code in SUPPORTED_LANGUAGE_CODES
 ], key=lambda o: o[1])
+
+from admin_steroids.utils import DictCursor
 
 from . import constants as c
 from . import settings as _settings
@@ -111,7 +115,7 @@ class Domain(models.Model):
         help_text=_('''The maximum number of recursive inferences to make.'''))
     
     min_inference_probability = models.FloatField(
-        default=0.1,
+        default=0.5,
         help_text=_('''The minimum probability necessary to trigger
         an inference.'''))
     
@@ -120,6 +124,85 @@ class Domain(models.Model):
     
     def __str__(self):
         return '<Domain: %s>' % (self.slug,)
+    
+    def create_target(self, slug):
+        t, _ = Target.objects.get_or_create(
+            domain=self,
+            slug=slug,
+            conceptnet_subject=slug)
+        return t
+    
+    def create_question(self, predicate, object):
+        slug = predicate + ',' + object
+        q, _ = Question.objects.get_or_create(
+            domain=self,
+            slug=slug,
+            conceptnet_predicate=predicate,
+            conceptnet_object=object)
+        return q
+    
+    def create_weight(self, subject, predicate, object):
+        t = self.create_target(subject)
+        q = self.create_question(predicate, object)
+        tq, _ = TargetQuestionWeight.objects.get_or_create(
+            target=t, question=q)
+        return tq
+    
+    @commit_on_success
+    def infer(self, limit=1000, continuous=True, target=None, verbose=False, iter_commit=True):
+        """
+        Creates new weights based on all enabled inference rules.
+        
+        limit := The maximum number of weights to infer per batch.
+        """
+        if not self.allow_inference:
+            return
+        while 1:
+            created = False
+            for rule in self.rules.filter(enabled=True).iterator():
+                matches = rule.get_matches(limit=limit, target=target, verbose=verbose)
+                for triple, parent_ids in matches:
+                    assert len(triple), \
+                        'Invalid triple, length %i.' % len(triple)
+                    print 'Infering:', triple
+                    weights = TargetQuestionWeight.objects\
+                        .filter(id__in=parent_ids)
+                    #weight,count,prob,inference_depth
+                    aggs = weights.aggregate(
+                        Max('inference_depth'),
+                        Min('weight'),
+                        Min('prob'),
+                        Min('count'))
+                    #print triple, parent_ids, weights
+                    #print 'aggs:',aggs
+                    target_slug = triple[0]
+                    #question_slug = '%s,%s' % tuple(triple[1:])
+                    w = self.create_weight(target_slug, triple[1], triple[2])
+                    w.inference_depth = (aggs['inference_depth__max'] or 0) + 1
+                    weight = max(aggs['weight__min'], 0)
+                    count = max(aggs['count__min'], 1)
+                    prob = aggs['prob__min']
+                    #print weight,count,prob
+                    weight = int(round(weight * prob))
+                    count = max(1, int(round(count * prob)))
+                    #print 'weight:',weight
+                    w.weight = weight
+                    w.count = count
+                    w.save()
+                    
+                    TargetQuestionWeightInference.objects.get_or_create(
+                        rule=rule,
+                        weight=w,
+                        arguments=','.join(map(str, parent_ids)))
+                    
+                    created = True
+            
+            if iter_commit:
+                commit()
+            
+            # Only stop inferring when we run out of matches.
+            if not continuous or not created:
+                break
     
     #@commit_manually
     def purge(self, verbose=0):
@@ -480,33 +563,6 @@ GROUP BY m.session_id, m.target_id
         # a question, then 900 have an implicit weight as defined by
         # the domain's world assumption.
         cursor = connection.cursor()
-#        sql = """
-#SELECT  m.question_id,
-#        ABS(m.weight_sum + (({total_count} - m.target_count)*{missing_weight})) AS weight_sum_abs,
-#        m.weight_sum,
-#        m.target_count
-#        -- ,m.total_count
-#FROM (
-#    SELECT  q.id AS question_id,
-#            SUM(tqw.nweight) AS weight_sum,
-#            COUNT(tqw.target_id) AS target_count
-#            -- ,(SELECT COUNT(id) FROM asklet_target WHERE domain_id = {domain_id}) AS total_count
-#    FROM    asklet_question AS q
-#    LEFT OUTER JOIN
-#            asklet_targetquestionweight AS tqw ON
-#            tqw.question_id = q.id
-#        AND tqw.weight IS NOT NULL
-#    WHERE   q.enabled = CAST(1 AS bool)
-#        AND q.domain_id = {domain_id}
-#        {only_target_ids_str}
-#        {exclude_question_ids_str}
-#    GROUP BY q.id
-#) AS m
-#WHERE m.weight_sum IS NOT NULL
-#ORDER BY weight_sum_abs ASC
-#LIMIT 1;
-#        """.format(
-
         sql = """
 SELECT  m.question_id,
         ABS(m.weight_sum + (({total_target_count} - m.target_count)*{missing_weight})) AS weight_sum_abs,
@@ -542,61 +598,6 @@ WHERE m.weight_sum IS NOT NULL
 ORDER BY weight_sum_abs ASC
 LIMIT 1;
         """.format(
-
-        #TODO:This is an attempt to use the current target rank to improve
-        # the question rank. e.g. If a target is ranked highly, then recommend
-        # questions likely to confirm or deny it.
-        # It seems to have no effect on the learning rate
-        # of the test dataset, but does reduce speed by about 1 session/sec.
-#        sub_sql = self._query_targetrankings(
-#            session_id=session_id,
-#            only_target_ids=only_target_ids,
-#            verbose=verbose,
-#            limit=0,
-#            order_by=False,
-#            as_sql=True)#session_id, target_id, rank
-#        sql = """
-#SELECT  m.question_id,
-#        ABS(m.weight_sum + (({total_target_count} - m.target_count)*{missing_weight})) AS weight_sum_abs,
-#        m.weight_sum,
-#        m.target_count
-#FROM (
-#    SELECT  q.id AS question_id,
-#    
-#            -- TODO:is this correct?
-#            -- SUM(tqw.nweight) AS weight_sum,
-#            --SUM(COALESCE(a.answer, tqw.nweight)) AS weight_sum,
-#            SUM(COALESCE(a.answer, tr.rank)) AS weight_sum,
-#            
-#            COUNT(DISTINCT tqw.target_id) AS target_count
-#    FROM    asklet_question AS q
-#    LEFT OUTER JOIN
-#            asklet_targetquestionweight AS tqw ON
-#            tqw.question_id = q.id
-#        AND tqw.weight IS NOT NULL
-#    LEFT OUTER JOIN
-#            asklet_session AS s ON
-#            s.id = {session_id}
-#    LEFT OUTER JOIN
-#            asklet_answer AS a ON
-#            a.session_id = s.id
-#        AND a.question_id = tqw.question_id
-#    LEFT OUTER JOIN (
-#        {sub_sql} -- session_id, target_id, rank
-#    ) AS tr ON
-#            tr.session_id = s.id
-#        AND tr.target_id = tqw.target_id
-#    WHERE   q.enabled = CAST(1 AS bool)
-#        AND q.domain_id = {domain_id}
-#        {only_target_ids_str}
-#        {exclude_question_ids_str}
-#    GROUP BY q.id
-#) AS m
-#WHERE m.weight_sum IS NOT NULL
-#ORDER BY weight_sum_abs ASC
-#LIMIT 1;
-#        """.format(
-
             domain_id=self.id,
             session_id=session_id,
             total_target_count=total_target_count,
@@ -1022,6 +1023,7 @@ class Session(models.Model):
 SET_TARGET_INDEX = True
 
 def extract_language_code(s):
+    s = (s or '').strip()
     if not s:
         return
     parts = s.strip().split('/')
@@ -1030,6 +1032,28 @@ def extract_language_code(s):
     elif len(parts[2]) != 2:
         return
     return parts[2]
+
+def extract_pos(s):
+    s = (s or '').strip()
+    if not s:
+        return
+    parts = s.strip().split('/')
+    if len(parts) < 5:
+        return
+    elif len(parts[4]) < 1:
+        return
+    return parts[4]
+
+def extract_sense(s):
+    s = (s or '').strip()
+    if not s:
+        return
+    parts = s.strip().split('/')
+    if len(parts) < 6:
+        return
+    elif not len(parts[5]):
+        return
+    return parts[5]
 
 class Target(models.Model):
     """
@@ -1043,6 +1067,12 @@ class Target(models.Model):
         blank=False,
         null=False,
         db_index=True)
+        
+    slug_parts = models.PositiveIntegerField(
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False)
     
     text = models.TextField(
         blank=True,
@@ -1070,6 +1100,20 @@ class Target(models.Model):
         db_index=True,
         editable=False)
     
+    pos = models.CharField(
+        max_length=1,
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False)
+    
+    sense = models.CharField(
+        max_length=500,
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False)
+        
     enabled = models.BooleanField(
         default=False,
         db_index=True)
@@ -1100,6 +1144,15 @@ class Target(models.Model):
         if not self.language:
             self.language = extract_language_code(self.conceptnet_subject)
             
+        if not self.pos:
+            self.pos = extract_pos(self.conceptnet_subject)
+            
+        if not self.sense:
+            self.sense = extract_sense(self.conceptnet_subject)
+            
+        if self.slug_parts is None:
+            self.slug_parts = self.slug.count('/')
+            
         super(Target, self).save(*args, **kwargs)
 
 class QuestionManager(models.Manager):
@@ -1126,6 +1179,12 @@ class Question(models.Model):
         null=False,
         db_index=True)
     
+    slug_parts = models.PositiveIntegerField(
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False)
+        
     text = models.TextField(
         blank=True,
         null=True,
@@ -1154,6 +1213,20 @@ class Question(models.Model):
     
     language = models.CharField(
         max_length=2,
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False)
+    
+    pos = models.CharField(
+        max_length=1,
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False)
+    
+    sense = models.CharField(
+        max_length=500,
         blank=True,
         null=True,
         db_index=True,
@@ -1193,8 +1266,249 @@ class Question(models.Model):
         if not self.language:
             self.language = extract_language_code(self.conceptnet_object)
             
+        if not self.pos:
+            self.pos = extract_pos(self.conceptnet_object)
+            
+        if not self.sense:
+            self.sense = extract_sense(self.conceptnet_object)
+        
+        if self.slug_parts is None:
+            self.slug_parts = self.slug.count('/')
+        
         super(Question, self).save(*args, **kwargs)
 
+class InferenceRule(models.Model):
+    
+    domain = models.ForeignKey('Domain', related_name='rules')
+    
+    name = models.CharField(
+        max_length=100,
+        blank=False,
+        null=False)
+        
+    lhs = models.TextField(
+        blank=False,
+        null=False)
+        
+    rhs = models.TextField(
+        blank=False,
+        null=False)
+    
+    enabled = models.BooleanField(
+        default=True,
+        db_index=True)
+    
+    class Meta:
+        unique_together = (
+            ('domain', 'name'),
+        )
+        
+    def __unicode__(self):
+        return self.name
+    
+    def sql(self, limit=0, target=None, verbose=False):
+        """
+        Generates the SQL for finding matches.
+        """
+        selects = []
+        joins = ['FROM asklet_domain AS d']
+        wheres = ['d.id = %i' % self.domain.id]
+        groupbys = []
+        havings = []
+        lhs_parts = [_.strip() for _ in self.lhs.strip().split('\n') if _.strip()]
+        assert lhs_parts, 'No LHS defined.'
+        rhs_parts = [_.strip() for _ in self.rhs.strip().split('\n') if _.strip()]
+        assert rhs_parts, 'No RHS defined.'
+        
+#        var_to_field = {}
+#        field_to_field = {}
+#        field_to_literal = {}
+        field_to_literals = defaultdict(set)
+        variable_to_values = defaultdict(set)
+        
+        def is_literal(s):
+            return not s.startswith('?')
+        
+        def is_variable(s):
+            return s.startswith('?')
+            
+        i = 0
+        for part in lhs_parts:
+            i += 1
+            part = re.sub(r'[\s\t\n]+', ' ', part)
+            subject, predicate, object = part.split(' ')
+            #print subject, predicate, object
+            
+            selects.append('lw{i}.id AS _lw{i}_id'.format(i=i))
+            groupbys.append('lw{i}.id'.format(i=i))
+            
+            joins.append('''
+INNER JOIN asklet_target AS lt{i} ON lt{i}.domain_id = d.id
+INNER JOIN asklet_targetquestionweight AS lw{i} ON lw{i}.target_id = lt{i}.id
+INNER JOIN asklet_question AS lq{i} ON lq{i}.id = lw{i}.question_id
+    AND lq{i}.conceptnet_object != lt{i}.conceptnet_subject
+            '''.strip().format(i=i))
+            wheres.append('lt{i}.sense IS NOT NULL'.format(i=i))
+            
+            if target and i == 1:
+                wheres.append("lt{i}.slug = '{target}'".format(i=i, target=target))
+            
+            if self.domain.min_inference_probability:
+                wheres.append('lw{i}.prob >= {min_prob}'.format(
+                    i=i, min_prob=self.domain.min_inference_probability))
+            
+            if self.domain.max_inference_depth:
+                wheres.append(
+                    ('(lw{i}.inference_depth IS NULL OR '
+                    'lw{i}.inference_depth <= {max_depth})').format(
+                        i=i, max_depth=self.domain.max_inference_depth))
+                    
+            subject_field = 'lt{i}.conceptnet_subject'.format(i=i)
+            predicate_field = 'lq{i}.conceptnet_predicate'.format(i=i)
+            object_field = 'lq{i}.conceptnet_object'.format(i=i)
+            
+            if is_variable(subject):
+                variable_to_values[subject].add(subject_field)
+            else:
+                field_to_literals[subject_field].add(subject)
+                joins.append("    AND %s = '%s'" % (subject_field, subject))
+                
+            if is_variable(predicate):
+                variable_to_values[predicate].add(predicate_field)
+            else:
+                field_to_literals[predicate_field].add(predicate)
+                joins.append("    AND %s = '%s'" % (predicate_field, predicate))
+            
+            if is_variable(object):
+                variable_to_values[object].add(object_field)
+            else:
+                field_to_literals[object_field].add(object)
+                joins.append("    AND %s = '%s'" % (object_field, object))
+                
+        for variable, values in variable_to_values.iteritems():
+            if len(values) <= 1:
+                continue
+            values = list(values)
+            last = values[0]
+            for value in values[1:]:
+                joins.append("    AND %s = %s" % (last, value))
+                last = value
+        
+        j = 0
+        for part in rhs_parts:
+            j += 1
+            part = re.sub(r'[\s\t\n]+', ' ', part)
+            subject, predicate, object = part.split(' ')
+            #print subject, predicate, object
+            
+            subject_field = 'rt{j}.conceptnet_subject'.format(j=j)
+            predicate_field = 'rq{j}.conceptnet_predicate'.format(j=j)
+            object_field = 'rq{j}.conceptnet_object'.format(j=j)
+            
+            joins.append('''
+LEFT OUTER JOIN asklet_target AS rt{j} ON rt{j}.domain_id = d.id
+            '''.strip().format(j=j))
+            
+            if is_variable(subject):
+                other_field = list(variable_to_values[subject])[0]
+                joins.append("    AND %s = %s" % (subject_field, other_field))
+                selects.append(list(variable_to_values[subject])[0] + ' AS ' + subject[1:])
+                groupbys.append(list(variable_to_values[subject])[0])
+            else:
+                joins.append("    AND %s = '%s'" % (subject_field, subject))
+            
+            joins.append('''
+LEFT OUTER JOIN asklet_targetquestionweight AS rw{j} ON rw{j}.target_id = rt{j}.id
+LEFT OUTER JOIN asklet_question AS rq1 ON rq{j}.id = rw{j}.question_id
+            '''.strip().format(j=j))
+            
+            if is_variable(predicate):
+                other_field = list(variable_to_values[predicate])[0]
+                joins.append("    AND %s = %s" % (predicate_field, other_field))
+                selects.append(list(variable_to_values[predicate])[0] + ' AS ' + predicate[1:])
+                groupbys.append(list(variable_to_values[predicate])[0])
+            else:
+                joins.append("    AND %s = '%s'" % (predicate_field, predicate))
+                
+            if is_variable(object):
+                other_field = list(variable_to_values[object])[0]
+                joins.append("    AND %s = %s" % (object_field, other_field))
+                selects.append(list(variable_to_values[object])[0] + ' AS ' + object[1:])
+                groupbys.append(list(variable_to_values[object])[0])
+            else:
+                joins.append("    AND %s = '%s'" % (object_field, object))
+                
+            #wheres.append('rq{j}.id IS NULL'.format(j=j))
+            havings.append('MAX(rq{j}.id) IS NULL'.format(j=j))
+
+        parts = ['SELECT ' + (', '.join(selects))] + joins \
+            + ['WHERE ' + (' AND '.join(wheres))] \
+            + ['GROUP BY ' + (', '.join(groupbys))] \
+            + ['HAVING ' + (', '.join(havings))]
+        sql = '\n'.join(parts)
+        if limit:
+            sql += '\nLIMIT %i' % limit
+        #min_inference_probability
+        #max_inference_depth
+        if verbose:
+            print(sql)
+        return sql
+    
+    def get_matches(self, limit=100, target=None, verbose=False):
+        sql = self.sql(limit=limit, target=target, verbose=verbose)
+        #print sql
+        cursor = DictCursor()
+        cursor.execute(sql)
+        rhs_parts = [_.strip() for _ in self.rhs.split('\n') if _.strip()]
+        matches = []
+        for var_values in cursor:
+            #print 'var_values:',var_values
+            parent_ids = [
+                var_values[_k]
+                for _k in sorted(var_values.keys())
+                if _k.startswith('_lw') and _k.endswith('_id')
+            ]
+            for rhs_part in rhs_parts:
+                rhs_part = re.sub('[\s\t\n]+', ' ', rhs_part)
+                rhs_part = [
+                    ('{'+_[1:]+'}').format(**var_values)
+                    if _.startswith('?')
+                    else _
+                    for _ in rhs_part.split(' ')]
+                matches.append((rhs_part, parent_ids))
+        return matches
+
+class TargetQuestionWeightInference(models.Model):
+    """
+    Documents a rule's inference of a weight.
+    Note that multiple rules and argument combinations can potentially result
+    in the same weight.
+    """
+    
+    rule = models.ForeignKey(
+        'InferenceRule',
+        related_name='inferences',
+        editable=False)
+    
+    weight = models.ForeignKey(
+        'TargetQuestionWeight',
+        related_name='inferences',
+        editable=False)
+    
+    arguments = models.CharField(
+        max_length=500,
+        blank=False,
+        null=False,
+        editable=False,
+        verbose_name=_('argument IDs'),
+        help_text=_('''List of IDs of the arguments matching the
+            rule\'s left-hand-side.'''))
+    
+    class Meta:
+        unique_together = (
+            ('rule', 'weight', 'arguments'),
+        )
+        
 class TargetQuestionWeight(models.Model):
     """
     Represents the association between a target and question.
@@ -1240,6 +1554,16 @@ class TargetQuestionWeight(models.Model):
         db_index=True,
         help_text=_('The normalized weight scaled to [0:1].'))
     
+    inference_depth = models.PositiveIntegerField(
+        blank=True,
+        null=True,
+        editable=False,
+        db_index=True,
+        help_text=_('''If this node was inferred by a rule, this represents how
+            many previous inferences lead to this. A blank or depth of 0
+            indicates that the weight was entered by a user and that no rules
+            were used.'''))
+    
     @property
     def normalized_weight(self):
         if not self.count:
@@ -1260,6 +1584,13 @@ class TargetQuestionWeight(models.Model):
     
     def __str__(self):
         return u('%s %s = %s' % (self.target.slug, self.question.slug, self.weight))
+    
+    def vote(self, value, save=True):
+        assert c.NO <= value <= c.YES
+        self.weight += value
+        self.count += 1
+        if save:
+            self.save()
     
     def save(self, *args, **kwargs):
         

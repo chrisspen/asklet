@@ -159,27 +159,28 @@ def process(fn, part_name, domain_slug, commit_freq=10):
         line = line.decode('utf8')
         edge = ConceptNetEdge.from_string(line)
         
+        # Ignore languages we don't care about.
+        if domain.language:
+            subject_lang = models.extract_language_code(edge.start)
+            if subject_lang != domain.language:
+                continue
+            object_lang = models.extract_language_code(edge.end)
+            if object_lang != domain.language:
+                continue
+        
+        # Ignore edges without sense.
+        # Note, this skips an estimated 85% of edges.
+        start_sense = models.extract_sense(edge.start)
+        if not start_sense:
+            continue
+        end_sense = models.extract_sense(edge.end)
+        if not end_sense:
+            continue
+        
         retry = 0
         while 1:
             try:
                 retry += 1
-                    
-        #                print(edge)
-        #                print('fields:',edge.__dict__)
-        #                print('target:',edge.target_text)
-        #                print('question:',edge.question_text)
-        #                print('target slug:',edge.target_slug)
-        #                print('question slug:',edge.question_slug)
-        #                print('weight:',edge.weight_int)
-                
-                # Ignore languages we don't care about.
-                if domain.language:
-                    subject_lang = models.extract_language_code(edge.start)
-                    if subject_lang != domain.language:
-                        continue
-                    object_lang = models.extract_language_code(edge.end)
-                    if object_lang != domain.language:
-                        continue
                 
                 target, _ = models.Target.objects.get_or_create(
                     domain=domain,
@@ -262,25 +263,25 @@ class Command(BaseCommand):
                 )
                 for i in range(parts))
             
-            models.SET_TARGET_INDEX = True
-            q = domain.targets.filter(index__isnull=True).order_by('id')
-            total = q.count()
-            i = 0
-            for r in q.iterator():
-                i += 1
-                if i == 1 or not i % 10 or i == total:
-                    print('Updating target index %i of %i.' % (i, total))
-                r.save()
-            
-            models.SET_QUESTION_INDEX = True
-            q = domain.questions.filter(index__isnull=True).order_by('id')
-            total = q.count()
-            i = 0
-            for r in q.iterator():
-                i += 1
-                if i == 1 or not i % 10 or i == total:
-                    print('Updating question index %i of %i.' % (i, total))
-                r.save()
+#            models.SET_TARGET_INDEX = True
+#            q = domain.targets.filter(index__isnull=True).order_by('id')
+#            total = q.count()
+#            i = 0
+#            for r in q.iterator():
+#                i += 1
+#                if i == 1 or not i % 10 or i == total:
+#                    print('Updating target index %i of %i.' % (i, total))
+#                r.save()
+#            
+#            models.SET_QUESTION_INDEX = True
+#            q = domain.questions.filter(index__isnull=True).order_by('id')
+#            total = q.count()
+#            i = 0
+#            for r in q.iterator():
+#                i += 1
+#                if i == 1 or not i % 10 or i == total:
+#                    print('Updating question index %i of %i.' % (i, total))
+#                r.save()
             
         finally:
             settings.DEBUG = tmp_settings

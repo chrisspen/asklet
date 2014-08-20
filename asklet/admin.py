@@ -6,24 +6,21 @@ from django.utils.translation import (
     ugettext_lazy as _
 )
 
+from admin_steroids.options import BetterRawIdFieldsModelAdmin
+from admin_steroids.filters import NullListFilter
+
 from . import models
 
-try:
-    from admin_steroids.options import BetterRawIdFieldsModelAdmin
-    
-    class ModelAdmin(BetterRawIdFieldsModelAdmin):
-        pass
-    
-except ImportError:
-    ModelAdmin = admin.ModelAdmin
-#    ApproxCountQuerySet = None
+class ModelAdmin(BetterRawIdFieldsModelAdmin):
+    pass
+
 
 class DomainAdmin(ModelAdmin):
     
     list_display = (
         'id',
         'slug',
-        'targets_count',
+        #'targets_count',
         'connectivity_str',
     )
     
@@ -37,6 +34,7 @@ class DomainAdmin(ModelAdmin):
         'targets_count',
         'question_count',
         'session_count',
+        'rule_count',
     )
     
     def connectivity_str(self, obj):
@@ -65,8 +63,81 @@ class DomainAdmin(ModelAdmin):
         return '<a href="/admin/asklet/session/?domain=%i" class="button" target="_blank">View %i</a>' % (obj.id, obj.sessions.all().count(),)
     session_count.short_description = 'sessions'
     session_count.allow_tags = True
+    
+    def rule_count(self, obj):
+        if not obj:
+            return 0
+        return '<a href="/admin/asklet/inferencerule/?domain=%i" class="button" target="_blank">View %i</a>' % (obj.id, obj.rules.all().count(),)
+    rule_count.short_description = 'rules'
+    rule_count.allow_tags = True
 
 admin.site.register(models.Domain, DomainAdmin)
+
+class InferenceRuleAdmin(ModelAdmin):
+    
+    list_display = (
+        'name',
+        'domain',
+        'enabled',
+    )
+    
+    list_filter = (
+        'enabled',
+    )
+    
+    raw_id_fields = (
+        'domain',
+    )
+    
+    readonly_fields = (
+        'inference_count',
+    )
+    
+    def inference_count(self, obj):
+        if not obj:
+            return 0
+        return '<a href="/admin/asklet/targetquestionweightinference/?rule=%i" class="button" target="_blank">View %i</a>' % (obj.id, obj.inferences.all().count(),)
+    inference_count.short_description = 'inferences'
+    inference_count.allow_tags = True
+
+admin.site.register(models.InferenceRule, InferenceRuleAdmin)
+
+class TargetQuestionWeightInferenceAdmin(ModelAdmin):
+    
+    list_display = (
+        'id',
+        'rule',
+        'weight',
+        'arguments',
+    )
+    
+    list_filter = (
+    )
+    
+    raw_id_fields = (
+        'rule',
+        'weight',
+    )
+    
+    readonly_fields = (
+        'rule',
+        'weight',
+        'arguments',
+        'arguments_str',
+    )
+    
+    def arguments_str(self, obj=None):
+        if not obj:
+            return ''
+        parents = [
+            models.TargetQuestionWeight.objects.get(id=int(_))
+            for _ in obj.arguments.split(',')
+        ]
+        return '<br/>'.join(map(unicode, parents))
+    arguments_str.short_description = 'arguments'
+    arguments_str.allow_tags = True
+
+admin.site.register(models.TargetQuestionWeightInference, TargetQuestionWeightInferenceAdmin)
 
 class TargetAdmin(ModelAdmin):
     
@@ -94,7 +165,10 @@ class TargetAdmin(ModelAdmin):
     
     readonly_fields = (
         'weights_count',
+        'slug_parts',
         'language_name',
+        'pos',
+        'sense',
     )
     
     def weights_count(self, obj):
@@ -132,7 +206,10 @@ class QuestionAdmin(ModelAdmin):
     
     readonly_fields = (
         'weights_count',
+        'slug_parts',
         'language_name',
+        'pos',
+        'sense',
     )
     
     def weights_count(self, obj):
@@ -154,6 +231,7 @@ class TargetQuestionWeightAdmin(ModelAdmin):
         'count',
         #'normalized_weight',
         'prob',
+        'inference_depth',
     )
     
     search_fields = (
@@ -162,6 +240,7 @@ class TargetQuestionWeightAdmin(ModelAdmin):
     )
     
     list_filter = (
+        ('inference_depth', NullListFilter),
     )
     
     raw_id_fields = (
@@ -172,6 +251,8 @@ class TargetQuestionWeightAdmin(ModelAdmin):
     readonly_fields = (
         #'weights_count',
         'normalized_weight',
+        'prob',
+        'inference_count',
     )
     
     def lookup_allowed(self, key, value=None):
@@ -182,6 +263,13 @@ class TargetQuestionWeightAdmin(ModelAdmin):
             return 0
         return obj.weights.all().count()
     weights_count.short_description = 'weights'
+    
+    def inference_count(self, obj):
+        if not obj:
+            return 0
+        return '<a href="/admin/asklet/targetquestionweightinference/?weight=%i" class="button" target="_blank">View %i</a>' % (obj.id, obj.inferences.all().count(),)
+    inference_count.short_description = 'inferences'
+    inference_count.allow_tags = True
     
 admin.site.register(models.TargetQuestionWeight, TargetQuestionWeightAdmin)
 

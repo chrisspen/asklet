@@ -12,6 +12,8 @@ def get_reqs(testing=False):
         # Note, you may need to do:
         # sudo apt-get install python2.7-dev python3-dev
         'PyYAML>=3.11',
+        'ConceptNet',
+        'django-admin-steroids>=0.2.14',
     ]
     if testing:
         reqs.extend([
@@ -75,6 +77,8 @@ class TestCommand(Command):
             cmd = '. ./.env{pv}/bin/activate; django-admin.py test --pythonpath=. --settings=asklet.tests.settings asklet.tests; deactivate'.format(**kwargs)
         #print(cmd)
         os.system(cmd)
+
+#wget -P .env2.7/local/lib/python2.7/site-packages/conceptnet5/support_data/ https://raw.githubusercontent.com/commonsense/conceptnet5/master/conceptnet5/support_data/iso639.txt
 
 setup(
     name = 'asklet',

@@ -314,4 +314,73 @@ class Tests(TestCase):
         history = domain.accuracy_history()
         #print('history:',history)
         self.assertEqual(history[-1], 1.0)
+    
+    def test_extract_uri(self):
+        
+        uri = '/c/en/cat'
+        self.assertEqual(models.extract_language_code(uri), 'en')
+        
+        uri = '/c/en/cat/n'
+        self.assertEqual(models.extract_pos(uri), 'n')
+        
+        uri = '/c/en/cat/n/domestic_pet'
+        self.assertEqual(models.extract_sense(uri), 'domestic_pet')
+        
+    def test_rules(self):
+        
+        domain = models.Domain.objects.get(slug='test')
+        domain.allow_inference = True
+        domain.save()
+        
+        r = models.InferenceRule(
+            domain=domain,
+            name='IsA',
+            lhs='?a /r/IsA ?b\n?b /r/IsA ?c',
+            rhs='?a /r/IsA ?c')
+        r.save()
+        
+        self.assertEqual(domain.rules.all().count(), 1)
+        
+        t = domain.create_target('/c/en/cat/n/feline_animal')
+        self.assertEqual(t.conceptnet_subject, '/c/en/cat/n/feline_animal')
+        self.assertEqual(t.language, 'en')
+        self.assertEqual(t.pos, 'n')
+        self.assertEqual(t.sense, 'feline_animal')
+        
+        q = domain.create_question('/r/IsA', '/c/en/feline/n/cat_family')
+        self.assertEqual(q.conceptnet_predicate, '/r/IsA')
+        self.assertEqual(q.conceptnet_object, '/c/en/feline/n/cat_family')
+        self.assertEqual(q.language, 'en')
+        self.assertEqual(q.pos, 'n')
+        self.assertEqual(q.sense, 'cat_family')
+        
+        tq1 = models.TargetQuestionWeight.objects.create(target=t, question=q)
+        tq1.vote(c.YES)
+        self.assertEqual(tq1.nweight, 4.0)
+        self.assertEqual(tq1.prob, 1.0)
+        
+        tq2 = domain.create_weight(
+            '/c/en/feline/n/cat_family',
+            '/r/IsA',
+            '/c/en/mammal/n/warm_blooded_animal')
+        tq2.vote(c.YES)
+        self.assertEqual(tq2.nweight, 4.0)
+        self.assertEqual(tq2.prob, 1.0)
+        
+        domain.infer(continuous=False, iter_commit=False)
+        
+        # Confirm "cat IsA mammal" was inferred.
+        q = models.TargetQuestionWeight.objects.filter(target__domain=domain)
+        self.assertEqual(q.count(), 3)
+        tqw = models.TargetQuestionWeight.objects.get(id=3)
+        self.assertEqual(tqw.count, 1)
+        self.assertEqual(tqw.weight, 4)
+        self.assertEqual(tqw.prob, 1.0)
+        self.assertEqual(tqw.target.slug, '/c/en/cat/n/feline_animal')
+        self.assertEqual(tqw.question.slug, '/r/IsA,/c/en/mammal/n/warm_blooded_animal')
+        self.assertEqual(tqw.inferences.all().count(), 1)
+        
+        domain.infer(continuous=False, iter_commit=False)
+        q = models.TargetQuestionWeight.objects.filter(target__domain=domain)
+        self.assertEqual(q.count(), 3)
         

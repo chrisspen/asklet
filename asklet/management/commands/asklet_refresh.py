@@ -61,8 +61,13 @@ class Command(BaseCommand):
                         commit()
                 tqw.save()
         
-            targets = domain.targets.filter(language__isnull=True)
+            targets = domain.targets.filter(
+                Q(slug_parts__isnull=True)|\
+                Q(language__isnull=True)|\
+                Q(pos__isnull=True, slug_parts__gt=3)|\
+                Q(sense__isnull=True, slug_parts__gt=4))
             total = targets.count()
+            print '%i stale targets.' % total
             i = 0
             for r in targets.iterator():
                 i += 1
@@ -74,8 +79,13 @@ class Command(BaseCommand):
                         commit()
                 r.save()
                 
-            questions = domain.questions.filter(language__isnull=True)
+            questions = domain.questions.filter(
+                Q(slug_parts__isnull=True)|\
+                Q(language__isnull=True)|\
+                Q(pos__isnull=True, slug_parts__gt=5)|\
+                Q(sense__isnull=True, slug_parts__gt=6))
             total = questions.count()
+            print '%i stale questions.' % total
             i = 0
             for r in questions.iterator():
                 i += 1

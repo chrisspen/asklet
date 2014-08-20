@@ -1,0 +1,53 @@
+select
+--count(*)
+--3981897 with surface text but without sense
+--44274 without surface text but with sense
+
+distinct
+
+lt1.conceptnet_subject,--A
+lq1.conceptnet_predicate,
+lq1.conceptnet_object,--B
+
+lt2.conceptnet_subject,--B
+lq2.conceptnet_predicate,
+lq2.conceptnet_object--C
+
+/*
+,rt1.conceptnet_subject,--A
+rq1.conceptnet_predicate,
+rq1.conceptnet_object--C
+*/
+
+from asklet_domain as d
+
+inner join asklet_target as lt1 on lt1.domain_id=d.id
+inner join asklet_targetquestionweight as lw1 on lw1.target_id = lt1.id
+inner join asklet_question as lq1 on lq1.id = lw1.question_id
+    and lq1.conceptnet_object != lt1.conceptnet_subject
+
+inner join asklet_target as lt2 on lt2.domain_id=d.id
+inner join asklet_targetquestionweight as lw2 on lw2.target_id = lt2.id
+inner join asklet_question as lq2 on lq2.id = lw2.question_id
+    and lq2.conceptnet_object != lt2.conceptnet_subject
+
+and d.id = 1
+and lq1.conceptnet_object = lt2.conceptnet_subject
+and lq1.conceptnet_predicate = '/r/IsA'
+and lq2.conceptnet_predicate = '/r/IsA'
+
+left outer join asklet_target as rt1 on rt1.domain_id=d.id
+    and rt1.conceptnet_subject = lt1.conceptnet_subject
+left outer join asklet_targetquestionweight as rw1 on rw1.target_id = rt1.id
+left outer join asklet_question as rq1 on rq1.id = rw1.question_id
+    and rq1.conceptnet_predicate = '/r/IsA'
+    and rq1.conceptnet_object = lq2.conceptnet_object
+
+where rq1.id is null
+
+and lt1.sense is not null -- A
+and lq2.sense is not null -- C
+
+--and lt1.conceptnet_subject like '/c/en/river/%'
+
+limit 20
