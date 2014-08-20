@@ -1,0 +1,2 @@
+﻿SELECT datname, pid, query FROM pg_stat_activity;
+--SELECT pg_cancel_backend(8171);

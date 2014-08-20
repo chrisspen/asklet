@@ -1413,20 +1413,19 @@ LEFT OUTER JOIN asklet_target AS rt{j} ON rt{j}.domain_id = d.id
                 other_field = list(variable_to_values[subject])[0]
                 joins.append("    AND %s = %s" % (subject_field, other_field))
                 selects.append(list(variable_to_values[subject])[0] + ' AS ' + subject[1:])
-                groupbys.append(list(variable_to_values[subject])[0])
+                #groupbys.append(list(variable_to_values[subject])[0])
             else:
                 joins.append("    AND %s = '%s'" % (subject_field, subject))
             
             joins.append('''
-LEFT OUTER JOIN asklet_targetquestionweight AS rw{j} ON rw{j}.target_id = rt{j}.id
-LEFT OUTER JOIN asklet_question AS rq1 ON rq{j}.id = rw{j}.question_id
+LEFT OUTER JOIN asklet_question AS rq{j} ON rq{j}.domain_id = d.id
             '''.strip().format(j=j))
             
             if is_variable(predicate):
                 other_field = list(variable_to_values[predicate])[0]
                 joins.append("    AND %s = %s" % (predicate_field, other_field))
                 selects.append(list(variable_to_values[predicate])[0] + ' AS ' + predicate[1:])
-                groupbys.append(list(variable_to_values[predicate])[0])
+                #groupbys.append(list(variable_to_values[predicate])[0])
             else:
                 joins.append("    AND %s = '%s'" % (predicate_field, predicate))
                 
@@ -1434,17 +1433,21 @@ LEFT OUTER JOIN asklet_question AS rq1 ON rq{j}.id = rw{j}.question_id
                 other_field = list(variable_to_values[object])[0]
                 joins.append("    AND %s = %s" % (object_field, other_field))
                 selects.append(list(variable_to_values[object])[0] + ' AS ' + object[1:])
-                groupbys.append(list(variable_to_values[object])[0])
+                #groupbys.append(list(variable_to_values[object])[0])
             else:
                 joins.append("    AND %s = '%s'" % (object_field, object))
                 
-            #wheres.append('rq{j}.id IS NULL'.format(j=j))
-            havings.append('MAX(rq{j}.id) IS NULL'.format(j=j))
+            joins.append('''
+LEFT OUTER JOIN asklet_targetquestionweight AS rw{j} ON rw{j}.target_id = rt{j}.id AND rw{j}.question_id = rq{j}.id
+            '''.strip().format(j=j))
+                
+            wheres.append('rw{j}.id IS NULL'.format(j=j))
+            #havings.append('MAX(rq{j}.id) IS NULL'.format(j=j))
 
         parts = ['SELECT ' + (', '.join(selects))] + joins \
-            + ['WHERE ' + (' AND '.join(wheres))] \
-            + ['GROUP BY ' + (', '.join(groupbys))] \
-            + ['HAVING ' + (', '.join(havings))]
+            + ['WHERE ' + (' AND '.join(wheres))]#\
+#            + ['GROUP BY ' + (', '.join(groupbys))] \
+#            + ['HAVING ' + (', '.join(havings))]
         sql = '\n'.join(parts)
         if limit:
             sql += '\nLIMIT %i' % limit
