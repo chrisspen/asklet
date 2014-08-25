@@ -121,6 +121,12 @@ class Domain(models.Model):
         default=0.5,
         help_text=_('''The minimum probability necessary to trigger
         an inference.'''))
+        
+    default_inference_count = models.IntegerField(
+        default=1,
+        help_text=_('''The default count used when creating an inferred weight.
+            A low value allows the inference to be quickly overriden by user input.
+            A high value makes the inference longer lived.'''))
     
     created = models.DateTimeField(
         auto_now_add=True,
@@ -219,18 +225,8 @@ class Domain(models.Model):
                     probs = [((_ - 0) / float(1 - 0))*(1.0 - -1.0) + -1.0 for _ in probs]
                     prob = reduce(lambda a,b:a*b, probs, 1.0)
                     prob = ((prob - -1.0) / float(+1.0 - -1.0))*(1.0 - 0.0) + 0
-                    #print('prob final:',prob)
-                    #print weight,count,prob
-                    #weight = weight * prob
-                    #prob = ((prob - 0) / float(1 - 0))*(1.0 - 0.5) + 0.5
-                    #prob = ((prob - 0) / float(1 - 0))*(4 - 0.5) + 0.5
-                    #weight = count * prob
-                    count = 1.0
-                    weight = (prob*(c.YES - c.NO) - c.YES)*count
-                    #weight = (prob*(c.YES - c.DEPENDS) - c.YES)*count
-                    #weight = int(round(count * (prob*2-1)))
-                    #print('weight:',weight)
-                    #print('count:',count)
+                    count = self.default_inference_count
+                    weight = (prob*(c.YES - c.NO) - c.YES)*float(count)
                     
                     w.weight = weight
                     w.count = count
@@ -295,28 +291,35 @@ class Domain(models.Model):
         i = 0
         for target_slug in agg:
             
+            target = None
             target_sense = guess_sense(target_slug)
             print('target:',target_slug, target_sense)
-            if not target_sense:
-                continue
-            target_sense, target_sense_prob = target_sense
-            print('target prob:',target_sense_prob)
-            target = Target.objects.get(domain=self, slug=target_sense)
+            if target_sense:
+                target_sense, target_sense_prob = target_sense
+                print('target prob:',target_sense_prob)
+                target = Target.objects.get(domain=self, slug=target_sense)
                 
             local_weights = weights.filter(target__slug=target_slug)
             for local_weight in local_weights.iterator():
-                weight_prob = target_sense_prob
+                probs = [target_sense_prob]
+                
+                if not target:
+                    local_weight.disambiguation_success = False
+                    local_weight.save()
+                    continue
                 
                 # Lookup unambiguous question.
                 question = None
                 if local_weight.question.sense:
                     question = local_weight.question
                 else:
-                    question_sense = guess_sense(local_weight.question.conceptnet_object, pos=target.pos)
+                    question_sense = guess_sense(
+                        local_weight.question.conceptnet_object,
+                        pos=target.pos)
                     if question_sense:
                         question_sense, question_sense_prob = question_sense
                         print('question prob:',question_sense_prob)
-                        weight_prob *= question_sense_prob
+                        probs.append(question_sense_prob)
                         question, _ = Question.objects.get_or_create(
                             domain=self,
                             slug=local_weight.question.conceptnet_predicate+','+question_sense,
@@ -325,13 +328,22 @@ class Domain(models.Model):
                         )
                         
                 if question:
-                    print('Inferring:', target.slug, question.slug, weight_prob)
+                    
+                    probs = [((_ - 0) / float(1 - 0))*(1.0 - -1.0) + -1.0 for _ in probs]
+                    prob = reduce(lambda a,b:a*b, probs, 1.0)
+                    prob = ((prob - -1.0) / float(+1.0 - -1.0))*(1.0 - 0.0) + 0
+                    count = self.default_inference_count
+                    weight = (prob*(c.YES - c.NO) - c.YES)*float(count)
+                    
+                    print('Inferring:', target.slug, question.slug, prob)
                     weight, _ = TargetQuestionWeight.objects.get_or_create(
                         target=target,
                         question=question,
                         defaults=dict(
-                            weight=int(round(local_weight.weight*(weight_prob*2-1))),
-                            count=local_weight.count,
+                            #weight=int(round(local_weight.weight*(weight_prob*2-1))),
+                            #count=local_weight.count,
+                            weight=weight,
+                            count=count,
                             inference_depth=(local_weight.inference_depth or 0) + 1,
                         ),
                     )
@@ -341,9 +353,12 @@ class Domain(models.Model):
                         arguments=str(local_weight.id),
                     )
                     local_weight.disambiguated = timezone.now()
+                    local_weight.disambiguation_success = True
                     local_weight.save()
                 else:
-                    continue
+                    #TODO:mark local_weight as inference attempted and failed so we won't retry?
+                    local_weight.disambiguation_success = False
+                    local_weight.save()
                     
             if not dryrun:
                 commit()
@@ -1820,6 +1835,7 @@ class TargetQuestionWeightManager(models.Manager):
             target__sense__isnull=True,
             question__sense__isnull=True,
             disambiguated__isnull=True,
+            disambiguation_success__isnull=True,
             prob__gt=F('target__domain__min_inference_probability'),
         ).filter(
             Q(inference_depth__isnull=True)|\
@@ -1891,6 +1907,12 @@ class TargetQuestionWeight(models.Model):
         help_text=_('''The date/time when this weight had a less-ambiguous
             version of it created. This will be blank for edges whose nodes
             have no ambiguity.'''))
+            
+    disambiguation_success = models.NullBooleanField(
+        default=None,
+        db_index=True,
+        help_text=_('''If true, indicates disambiguation succeeded.
+            If false, indicates failure.'''))
     
     created = models.DateTimeField(
         auto_now_add=True,
