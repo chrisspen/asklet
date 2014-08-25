@@ -1,7 +1,7 @@
 /*
 Finds the sense with most overlap to a senseless subject.
 */
-DROP VIEW IF EXISTS asklet_targetguess CASCADE;
+DROP VIEW IF EXISTS asklet_targetguess;
 CREATE VIEW asklet_targetguess
 AS
 select

@@ -1,7 +1,7 @@
 /*
 Finds targets that should exist but are missing.
 */
-DROP VIEW IF EXISTS asklet_targetmissing CASCADE;
+DROP VIEW IF EXISTS asklet_targetmissing;
 CREATE VIEW asklet_targetmissing
 AS
 SELECT  q.conceptnet_object AS target_slug,

@@ -1,3 +1,4 @@
+from __future__ import print_function
 import sys
 import random
 import time
@@ -77,7 +78,7 @@ class Tests(TestCase):
         domain = models.Domain.objects.get(slug='test')
         
         mu = utils.MatrixUser('asklet/tests/fixtures/matrix.yaml')
-        mu.target = 'bird'
+        mu.target = '/c/en/bird/n/bird'
         #print(mu.target)
         
         session = domain.get_session(mu)
@@ -92,11 +93,11 @@ class Tests(TestCase):
         self.assertEqual(len(weights), 3)
         self.assertTrue(weights[0].weight)
         
-        q1 = models.Question.objects.create(domain=domain, slug='has_fur')
+        q1 = models.Question.objects.create(domain=domain, slug='/r/IsA/,/c/en/has_fur/n/has_fur')
         #q2 = models.Question.objects.create(domain=domain, slug='has_wings')
         #q3 = models.Question.objects.create(domain=domain, slug='barks')
-        bat = models.Target.objects.create(domain=domain, slug='bat')
-        rat = models.Target.objects.create(domain=domain, slug='rat')
+        bat = models.Target.objects.create(domain=domain, slug='/c/en/bat/n/bat')
+        rat = models.Target.objects.create(domain=domain, slug='/c/en/rat/n/rat')
         
         session = domain.get_session(user='123')
         
@@ -121,7 +122,14 @@ class Tests(TestCase):
         self.assertEqual(answers.count(), 2)
         
         q = session.get_next_question()
-#        print(q)
+        
+        q = domain.targets.all()
+        for target in q.iterator():
+            self.assertTrue(target.sense)
+        
+        q = domain.questions.all()
+        for question in q.iterator():
+            self.assertTrue(question.sense)
         
     def test_learn_manual_sql(self):
         settings.ASKLET_RANKER = c.SQL
@@ -197,7 +205,7 @@ class Tests(TestCase):
             seed=0)
         domain = models.Domain.objects.get(slug=domain_name)
         history = domain.accuracy_history()
-        print('cwa history:',history)
+        print('closed-world-assumption history:',history)
         self.assertEqual(history[-1], 1.0)
         
         # Reset domain.
@@ -224,7 +232,7 @@ class Tests(TestCase):
             seed=0)
         domain = models.Domain.objects.get(slug=domain_name)
         history = domain.accuracy_history()
-        print('owa history:',history)
+        print('open-world-assumption history:',history)
         self.assertEqual(history[-1], 1.0)
     
     def test_numpy(self):

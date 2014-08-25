@@ -63,7 +63,20 @@ class MatrixUser(BaseUser):
     
     def __init__(self, fn):
         super(BaseUser, self).__init__()
-        self.data = yaml.load(open(fn))
+        self.data = {}
+        
+        # Convert raw matrix to Conceptnet format.
+        data = yaml.load(open(fn))
+        for target, questions in data.iteritems():
+            target_slug = target
+            if '/' not in target:
+                target_slug = '/c/en/{name}/n/{name}'.format(name=target)
+            self.data.setdefault(target_slug, {})
+            for question, weight in questions.iteritems():
+                question_slug = question
+                if '/' not in question:
+                    question_slug = '/r/IsA,/c/en/{name}/n/{name}'.format(name=question)
+                self.data[target_slug][question_slug] = weight
         
     def think_of_something(self):
         """

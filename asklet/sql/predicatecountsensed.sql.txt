@@ -1,0 +1,10 @@
+--select * from asklet_targetmissing limit 10
+select conceptnet_predicate, count(*)
+from asklet_targetquestionweight as w
+inner join asklet_target as t on t.id=w.target_id
+    and t.sense is not null
+inner join asklet_question as q on q.id=w.question_id
+    and q.sense is not null
+    --and q.conceptnet_predicate='/r/HasA'
+group by q.conceptnet_predicate
+order by count(*) desc

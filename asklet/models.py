@@ -225,9 +225,9 @@ class Domain(models.Model):
                     #prob = ((prob - 0) / float(1 - 0))*(1.0 - 0.5) + 0.5
                     #prob = ((prob - 0) / float(1 - 0))*(4 - 0.5) + 0.5
                     #weight = count * prob
+                    count = 1.0
                     weight = (prob*(c.YES - c.NO) - c.YES)*count
                     #weight = (prob*(c.YES - c.DEPENDS) - c.YES)*count
-                    weight = int(weight)
                     #weight = int(round(count * (prob*2-1)))
                     #print('weight:',weight)
                     #print('count:',count)
@@ -1317,6 +1317,9 @@ class Target(models.Model):
         if not self.id and set_index and SET_TARGET_INDEX:
             self.index = self.domain.targets.all().only('id').count()
             
+        if not self.conceptnet_subject and '/' in self.slug:
+            self.conceptnet_subject = self.slug
+            
         if not self.language:
             self.language = extract_language_code(self.conceptnet_subject)
             
@@ -1526,7 +1529,13 @@ class Question(models.Model):
     def save(self, set_index=True, *args, **kwargs):
         if not self.id and set_index and SET_QUESTION_INDEX:
             self.index = self.domain.questions.all().only('id').count()
-            
+        
+        if '/' in self.slug and ',' in self.slug:
+            if not self.conceptnet_predicate:
+                self.conceptnet_predicate = self.slug.split(',')[0]
+            if not self.conceptnet_object:
+                self.conceptnet_object = ','.join(self.slug.split(',')[1:])
+        
         if not self.language:
             self.language = extract_language_code(self.conceptnet_object)
             
@@ -1832,7 +1841,7 @@ class TargetQuestionWeight(models.Model):
         Question,
         related_name='weights')
     
-    weight = models.IntegerField(
+    weight = models.FloatField(
         default=0,
         blank=False,
         null=False,
