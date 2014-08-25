@@ -145,7 +145,10 @@ class TargetAdmin(ModelAdmin):
         'id',
         'slug',
         'language_name',
-        'index',
+        'word',
+        'pos',
+        'sense',
+        #'index',
         'domain',
         'weights_count',
         'enabled',
@@ -180,13 +183,46 @@ class TargetAdmin(ModelAdmin):
     
 admin.site.register(models.Target, TargetAdmin)
 
+class TargetMissingAdmin(ModelAdmin):
+    
+    list_display = (
+        'slug',
+        'language',
+        'pos',
+        'domain',
+        'sense',
+    )
+    
+    list_filter = (
+        'language',
+        'pos',
+    )
+    
+    search_fields = (
+        'slug',
+    )
+    
+    readonly_fields = (
+        'slug',
+        'language',
+        'pos',
+        'domain',
+        'sense',
+        'text',
+    )
+
+admin.site.register(models.TargetMissing, TargetMissingAdmin)
+
 class QuestionAdmin(ModelAdmin):
     
     list_display = (
         'id',
         'slug',
         'language_name',
-        'index',
+        'word',
+        'pos',
+        'sense',
+        #'index',
         'domain',
         'weights_count',
         'enabled',

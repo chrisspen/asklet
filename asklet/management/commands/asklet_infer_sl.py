@@ -10,7 +10,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import connection, reset_queries
 from django.db.models import Q
-from django.db.transaction import commit_on_success, commit
+from django.db.transaction import commit_on_success, commit, rollback
 from django.utils import timezone
 
 from six.moves import cPickle as pickle
@@ -23,16 +23,16 @@ from asklet.utils import MatrixUser
 from asklet import models
 
 class Command(BaseCommand):
-    help = 'Generates weights using user-defined inference rules.'
+    help = 'Infer using semantic-Lesk.'
     args = ''
     option_list = BaseCommand.option_list + (
         make_option('--domain', default=''),
         make_option('--dryrun', action='store_true', default=False),
         make_option('--continuous', action='store_true', default=False),
         make_option('--verbose', action='store_true', default=False),
-        make_option('--limit', default=1000),
+        make_option('--limit', default=100),
         make_option('--target', default=''),
-        make_option('--rules', default=''),
+        #make_option('--rules', default=''),
     )
     
     @commit_on_success
@@ -42,20 +42,24 @@ class Command(BaseCommand):
         limit = int(options['limit'])
         domain_id = options['domain']
         verbose = options['verbose']
-        
-        q = models.Domain.objects.all()
-        if domain_id:
-            if domain_id.isdigit():
-                q = q.filter(id=int(domain_id))
-            else:
-                q = q.filter(slug=domain_id)
-        
-        for domain in q.iterator():
-            print('Processing domain %s.' % domain)
-            domain.infer(
-                continuous=options['continuous'],
-                limit=limit,
-                target=options['target'],
-                rules=options['rules'],
-                verbose=verbose)
+        try:
             
+            q = models.Domain.objects.all()
+            if domain_id:
+                if domain_id.isdigit():
+                    q = q.filter(id=int(domain_id))
+                else:
+                    q = q.filter(slug=domain_id)
+            
+            for domain in q.iterator():
+                print('Processing domain %s.' % domain)
+                domain.infer_sl(
+                    continuous=options['continuous'],
+                    limit=limit,
+                    target=options['target'],
+                    #rules=options['rules'],
+                    verbose=verbose)
+        finally:
+            if dryrun:
+                rollback()
+                

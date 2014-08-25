@@ -46,6 +46,8 @@ class Tests(TestCase):
         #print(q3.index)
         self.assertEqual(q3.index, 2)
         
+        unicode(q3)
+        
         try:
             # Duplicates should be prevented.
             with transaction.atomic():
@@ -58,6 +60,8 @@ class Tests(TestCase):
         bat = models.Target.objects.create(domain=domain, slug='bat')
         
         session = domain.get_session('test-user')
+        
+        unicode(session)
         
         models.Answer.objects.create(session=session, guess=bat, answer=c.YES)
         try:

@@ -170,12 +170,12 @@ def process(fn, part_name, domain_slug, commit_freq=10):
         
         # Ignore edges without sense.
         # Note, this skips an estimated 85% of edges.
-        start_sense = models.extract_sense(edge.start)
-        if not start_sense:
-            continue
-        end_sense = models.extract_sense(edge.end)
-        if not end_sense:
-            continue
+#        start_sense = models.extract_sense(edge.start)
+#        if not start_sense:
+#            continue
+#        end_sense = models.extract_sense(edge.end)
+#        if not end_sense:
+#            continue
         
         retry = 0
         while 1:

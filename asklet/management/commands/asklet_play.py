@@ -68,8 +68,7 @@ class Command(BaseCommand):
                 elif isinstance(q, models.Question):
                     print('Question %i:' % qi)
                     answer = user.ask(q.slug)
-                    models.Answer.objects.create(
-                        session=session,
+                    session.add_answer(
                         question=q,
                         answer=answer)
                 elif isinstance(q, models.Target):

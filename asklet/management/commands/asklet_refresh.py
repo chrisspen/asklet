@@ -60,10 +60,12 @@ class Command(BaseCommand):
                     if not dryrun:
                         commit()
                 tqw.save()
+            print
         
             targets = domain.targets.filter(
                 Q(slug_parts__isnull=True)|\
                 Q(language__isnull=True)|\
+                Q(word__isnull=True)|\
                 Q(pos__isnull=True, slug_parts__gt=3)|\
                 Q(sense__isnull=True, slug_parts__gt=4))
             total = targets.count()
@@ -78,10 +80,12 @@ class Command(BaseCommand):
                     if not dryrun:
                         commit()
                 r.save()
+            print
                 
             questions = domain.questions.filter(
                 Q(slug_parts__isnull=True)|\
                 Q(language__isnull=True)|\
+                Q(word__isnull=True)|\
                 Q(pos__isnull=True, slug_parts__gt=5)|\
                 Q(sense__isnull=True, slug_parts__gt=6))
             total = questions.count()
@@ -96,6 +100,21 @@ class Command(BaseCommand):
                     if not dryrun:
                         commit()
                 r.save()
+            print
+        
+            missing_targets = domain.missing_targets.all()
+            total = missing_targets.count()
+            i = 0
+            for mt in missing_targets.iterator():
+                i += 1
+                if i == 1 or not i % 100 or i == total:
+                    sys.stdout.write('\rProcessing missing target %i of %i %.02f%%.' \
+                        % (i, total, i/float(total)*100))
+                    sys.stdout.flush()
+                    if not dryrun:
+                        commit()
+                mt.materialize()
+            print
         
         if dryrun:
             raise Exception

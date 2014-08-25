@@ -1,14 +1,17 @@
+from __future__ import print_function
 import random
 import re
 import sys
+import uuid
 from collections import defaultdict
 
 from django.db import models, connection
-from django.db.transaction import commit_on_success, commit_manually, commit
-from django.db.models import Min, Max
+from django.db.transaction import commit_on_success, commit_manually, commit, rollback
+from django.db.models import Min, Max, Count, Sum, F, Q
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.utils.translation import ugettext_lazy as _
+from django.utils import timezone
 
 import six
 u = six.u
@@ -119,6 +122,12 @@ class Domain(models.Model):
         help_text=_('''The minimum probability necessary to trigger
         an inference.'''))
     
+    created = models.DateTimeField(
+        auto_now_add=True,
+        blank=True,
+        null=True,
+        editable=False)
+        
     def __unicode__(self):
         return self.slug
     
@@ -149,7 +158,7 @@ class Domain(models.Model):
         return tq
     
     @commit_on_success
-    def infer(self, limit=1000, continuous=True, target=None, verbose=False, iter_commit=True):
+    def infer(self, limit=1000, continuous=True, target=None, verbose=False, iter_commit=True, rules=None):
         """
         Creates new weights based on all enabled inference rules.
         
@@ -157,22 +166,45 @@ class Domain(models.Model):
         """
         if not self.allow_inference:
             return
+        
+        rule_ids = []
+        rule_slugs = []
+        if rules:
+            if isinstance(rules, basestring):
+                rules = [
+                    int(_.strip()) if _.isdigit() else _.strip()
+                    for _ in rules.split(',')
+                    if _.strip()
+                ]
+                
+            rule_ids = [_ for _ in rules if isinstance(_, int)]
+                
+            rule_slugs = [_ for _ in rules if isinstance(_, basestring)]
+        
+        rules = self.rules.filter(enabled=True)
+        if rule_ids:
+            rules = rules.filter(id__in=rule_ids)
+        if rule_slugs:
+            rules = rules.filter(name__in=rule_slugs)
+        
+        #print('rules:',rules)
         while 1:
             created = False
-            for rule in self.rules.filter(enabled=True).iterator():
+            for rule in rules.iterator():
                 matches = rule.get_matches(limit=limit, target=target, verbose=verbose)
                 for triple, parent_ids in matches:
                     assert len(triple), \
                         'Invalid triple, length %i.' % len(triple)
-                    print 'Infering:', triple
+                    print('Infering:', triple)
                     weights = TargetQuestionWeight.objects\
                         .filter(id__in=parent_ids)
                     #weight,count,prob,inference_depth
                     aggs = weights.aggregate(
                         Max('inference_depth'),
                         Min('weight'),
-                        Min('prob'),
+                        #Min('prob'),
                         Min('count'))
+                    probs = weights.values_list('prob', flat=True)
                     #print triple, parent_ids, weights
                     #print 'aggs:',aggs
                     target_slug = triple[0]
@@ -181,11 +213,25 @@ class Domain(models.Model):
                     w.inference_depth = (aggs['inference_depth__max'] or 0) + 1
                     weight = max(aggs['weight__min'], 0)
                     count = max(aggs['count__min'], 1)
-                    prob = aggs['prob__min']
+                    #prob = aggs['prob__min']
+                    #print('probs:',probs)
+                    
+                    probs = [((_ - 0) / float(1 - 0))*(1.0 - -1.0) + -1.0 for _ in probs]
+                    prob = reduce(lambda a,b:a*b, probs, 1.0)
+                    prob = ((prob - -1.0) / float(+1.0 - -1.0))*(1.0 - 0.0) + 0
+                    #print('prob final:',prob)
                     #print weight,count,prob
-                    weight = int(round(weight * prob))
-                    count = max(1, int(round(count * prob)))
-                    #print 'weight:',weight
+                    #weight = weight * prob
+                    #prob = ((prob - 0) / float(1 - 0))*(1.0 - 0.5) + 0.5
+                    #prob = ((prob - 0) / float(1 - 0))*(4 - 0.5) + 0.5
+                    #weight = count * prob
+                    weight = (prob*(c.YES - c.NO) - c.YES)*count
+                    #weight = (prob*(c.YES - c.DEPENDS) - c.YES)*count
+                    weight = int(weight)
+                    #weight = int(round(count * (prob*2-1)))
+                    #print('weight:',weight)
+                    #print('count:',count)
+                    
                     w.weight = weight
                     w.count = count
                     w.save()
@@ -203,6 +249,104 @@ class Domain(models.Model):
             # Only stop inferring when we run out of matches.
             if not continuous or not created:
                 break
+    
+    def infer_sl(self, continuous=False, limit=100, target=None, verbose=False, dryrun=False):
+        """
+        Infers using semantic-Lesk.
+        """
+        
+        def guess_sense(ambiguous_subject, pos=None):
+            try:
+                if pos:
+                    sql = """
+    select unambiguous_subject, avg_prob
+    from asklet_targetguess
+    where ambiguous_subject = %s and pos = %s
+    limit 1"""
+                    cursor = connection.cursor()
+                    cursor.execute(sql, [ambiguous_subject, pos])
+                else:
+                    sql = """
+    select unambiguous_subject, avg_prob
+    from asklet_targetguess
+    where ambiguous_subject = %s
+    limit 1"""
+                    cursor = connection.cursor()
+                    cursor.execute(sql, [ambiguous_subject])
+                results = list(cursor)
+                if results:
+                    return results[0]
+            except Exception as e:
+                print(e)
+                rollback()
+        
+        rule, _ = InferenceRule.objects.get_or_create(
+            domain=self, name='SemanticLesk')
+        rule.enabled = False
+        rule.save()
+        
+        weights = TargetQuestionWeight.objects.pending_ambiguous()
+        weights = weights.filter(target__domain=self)
+        if target:
+            weights = weights.filter(target__slug=target)
+        
+        agg = set(weights.values_list('target__slug', flat=True).distinct())
+        total = len(agg)
+        i = 0
+        for target_slug in agg:
+            
+            target_sense = guess_sense(target_slug)
+            print('target:',target_slug, target_sense)
+            if not target_sense:
+                continue
+            target_sense, target_sense_prob = target_sense
+            print('target prob:',target_sense_prob)
+            target = Target.objects.get(domain=self, slug=target_sense)
+                
+            local_weights = weights.filter(target__slug=target_slug)
+            for local_weight in local_weights.iterator():
+                weight_prob = target_sense_prob
+                
+                # Lookup unambiguous question.
+                question = None
+                if local_weight.question.sense:
+                    question = local_weight.question
+                else:
+                    question_sense = guess_sense(local_weight.question.conceptnet_object, pos=target.pos)
+                    if question_sense:
+                        question_sense, question_sense_prob = question_sense
+                        print('question prob:',question_sense_prob)
+                        weight_prob *= question_sense_prob
+                        question, _ = Question.objects.get_or_create(
+                            domain=self,
+                            slug=local_weight.question.conceptnet_predicate+','+question_sense,
+                            conceptnet_predicate=local_weight.question.conceptnet_predicate,
+                            conceptnet_object=question_sense,
+                        )
+                        
+                if question:
+                    print('Inferring:', target.slug, question.slug, weight_prob)
+                    weight, _ = TargetQuestionWeight.objects.get_or_create(
+                        target=target,
+                        question=question,
+                        defaults=dict(
+                            weight=int(round(local_weight.weight*(weight_prob*2-1))),
+                            count=local_weight.count,
+                            inference_depth=(local_weight.inference_depth or 0) + 1,
+                        ),
+                    )
+                    TargetQuestionWeightInference.objects.get_or_create(
+                        rule=rule,
+                        weight=weight,
+                        arguments=str(local_weight.id),
+                    )
+                    local_weight.disambiguated = timezone.now()
+                    local_weight.save()
+                else:
+                    continue
+                    
+            if not dryrun:
+                commit()
     
     #@commit_manually
     def purge(self, verbose=0):
@@ -386,7 +530,9 @@ FROM (
         AND tqw.target_id = t.id
     WHERE   t.domain_id = {domain_id}
         AND t.enabled = CAST(1 AS bool)
+        AND t.sense IS NOT NULL
         AND q.enabled = CAST(1 AS bool)
+        AND q.sense IS NOT NULL
         {question_ids_str}
         {exclude_target_ids_str}
         {only_target_ids_str}
@@ -404,7 +550,7 @@ GROUP BY m.session_id, m.target_id
             order_by_str='ORDER BY rank DESC' if order_by else '',
             limit_str=('LIMIT %i' % limit) if limit else '',
         )
-        if verbose: print('target sql:',sql)
+        if verbose: print('target sql:\n',sql)
         if as_sql:
             return sql
         cursor = connection.cursor()
@@ -412,8 +558,8 @@ GROUP BY m.session_id, m.target_id
         return cursor
     
     def rank_targets_sql(self, session, answers, prior_failed_target_ids=[], prior_top_target_ids=[], target_rankings=None, verbose=False):
-        assert isinstance(target_rankings, dict)
         target_rankings = target_rankings or defaultdict(int) # {target:rank}
+        assert isinstance(target_rankings, dict)
         
         targets = self.targets.all().only('id')
         
@@ -589,6 +735,7 @@ FROM (
             a.session_id = s.id
         AND a.question_id = tqw.question_id
     WHERE   q.enabled = CAST(1 AS bool)
+        AND q.sense IS NOT NULL
         AND q.domain_id = {domain_id}
         {only_target_ids_str}
         {exclude_question_ids_str}
@@ -746,7 +893,13 @@ class Session(models.Model):
         return min(unguessed_target_count, domain_question_count-2)
     
     def __unicode__(self):
-        return u('user %s in domain %s' % (self.user or self.user_uuid, self.domain))
+        return u'user %s in domain %s' % (self.user or self.user_uuid, self.domain)
+    
+    def add_answer(self, question, answer):
+        Answer.objects.create(
+            session=self,
+            question=question,
+            answer=answer)
     
     def get_top_targets_cache(self):
         #TODO:save to filesystem cache keyed by session id
@@ -1055,6 +1208,15 @@ def extract_sense(s):
         return
     return parts[5]
 
+def extract_word(s):
+    s = (s or '').strip()
+    if not s:
+        return
+    parts = s.strip().split('/')
+    if len(parts) < 4:
+        return
+    return parts[3]
+
 class Target(models.Model):
     """
     Things to guess.
@@ -1099,6 +1261,14 @@ class Target(models.Model):
         null=True,
         db_index=True,
         editable=False)
+
+    word = models.CharField(
+        max_length=500,
+        db_index=True,
+        blank=True,
+        null=True,
+        help_text=_('''The word segment of the ConceptNet5 URI.
+            e.g. "cat" given "/c/en/cat"'''))
     
     pos = models.CharField(
         max_length=1,
@@ -1117,6 +1287,12 @@ class Target(models.Model):
     enabled = models.BooleanField(
         default=False,
         db_index=True)
+        
+    created = models.DateTimeField(
+        auto_now_add=True,
+        blank=True,
+        null=True,
+        editable=False)
 
     class Meta:
         unique_together = (
@@ -1150,10 +1326,84 @@ class Target(models.Model):
         if not self.sense:
             self.sense = extract_sense(self.conceptnet_subject)
             
+        if not self.word:
+            self.word = extract_word(self.conceptnet_subject)
+            
         if self.slug_parts is None:
             self.slug_parts = self.slug.count('/')
             
         super(Target, self).save(*args, **kwargs)
+
+class TargetMissing(models.Model):
+    """
+    Returns all target slugs that have no target record defined.
+    """
+    
+    slug = models.CharField(
+        max_length=500,
+        blank=False,
+        null=False,
+        editable=False,
+        db_column='target_slug',
+        primary_key=True)
+    
+    domain = models.ForeignKey(
+        Domain,
+        related_name='missing_targets',
+        editable=False,
+        db_column='domain_id')
+    
+    language = models.CharField(
+        max_length=2,
+        blank=True,
+        null=True,
+        editable=False)
+    
+    pos = models.CharField(
+        max_length=1,
+        blank=True,
+        null=True,
+        editable=False)
+    
+    sense = models.CharField(
+        max_length=500,
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False)
+        
+    _text = models.TextField(
+        blank=True,
+        null=True,
+        editable=False,
+        db_column='text',
+        help_text=_('A user-friendly presentation of the question.'))
+        
+    class Meta:
+        managed = False
+        verbose_name = _('missing target')
+        verbose_name_plural = _('missing targets')
+    
+    @property
+    def text(self):
+        matches = re.findall(r'\[[^\]]+\][^\]]*\[([^\]]+)\]', self._text or '')
+        if matches:
+            return matches[0]
+    
+    def materialize(self):
+        target, _ = Target.objects.get_or_create(
+            domain=self.domain,
+            slug=self.slug,
+            defaults=dict(
+                conceptnet_subject=self.slug,
+                text=self.text,
+                enabled=True
+            )
+        )
+        return target
+    
+#    def save(self, *args, **kwargs):
+#        super(TargetMissing, self).save(*args, **kwargs)
 
 class QuestionManager(models.Manager):
     
@@ -1217,6 +1467,14 @@ class Question(models.Model):
         null=True,
         db_index=True,
         editable=False)
+
+    word = models.CharField(
+        max_length=500,
+        db_index=True,
+        blank=True,
+        null=True,
+        help_text=_('''The word segment of the ConceptNet5 URI.
+            e.g. "cat" given "/c/en/cat"'''))
     
     pos = models.CharField(
         max_length=1,
@@ -1237,6 +1495,12 @@ class Question(models.Model):
         db_index=True,
         help_text=_('''If checked, this question might be asked of the user.
             Otherwise, it will not be asked.'''))
+            
+    created = models.DateTimeField(
+        auto_now_add=True,
+        blank=True,
+        null=True,
+        editable=False)
     
     class Meta:
         unique_together = (
@@ -1272,6 +1536,9 @@ class Question(models.Model):
         if not self.sense:
             self.sense = extract_sense(self.conceptnet_object)
         
+        if not self.word:
+            self.word = extract_word(self.conceptnet_object)
+            
         if self.slug_parts is None:
             self.slug_parts = self.slug.count('/')
         
@@ -1298,6 +1565,12 @@ class InferenceRule(models.Model):
         default=True,
         db_index=True)
     
+    created = models.DateTimeField(
+        auto_now_add=True,
+        blank=True,
+        null=True,
+        editable=False)
+        
     class Meta:
         unique_together = (
             ('domain', 'name'),
@@ -1390,8 +1663,16 @@ INNER JOIN asklet_question AS lq{i} ON lq{i}.id = lw{i}.question_id
                 continue
             values = list(values)
             last = values[0]
+            last_pos = None
+            #TODO:make pos-link customizable by rule?
+            #e.g. IsA requires match, but others might not?
+            if '.conceptnet_' in last:
+                last_pos = last.split('.')[0] + '.pos'
             for value in values[1:]:
                 joins.append("    AND %s = %s" % (last, value))
+                if last_pos and '.conceptnet_' in value:
+                    value_pos = value.split('.')[0] + '.pos'
+                    joins.append("    AND %s = %s" % (last_pos, value_pos))
                 last = value
         
         j = 0
@@ -1507,15 +1788,41 @@ class TargetQuestionWeightInference(models.Model):
         help_text=_('''List of IDs of the arguments matching the
             rule\'s left-hand-side.'''))
     
+    @property
+    def argument_objects(self):
+        return [
+            TargetQuestionWeight.objects.get(id=int(_))
+            for _ in self.arguments.split(',')
+        ]
+    
     class Meta:
         unique_together = (
             ('rule', 'weight', 'arguments'),
         )
-        
+
+class TargetQuestionWeightManager(models.Manager):
+    
+    def pending_ambiguous(self):
+        """
+        Returns all ambiguous edges that haven't seen any attempt
+        to disambiguate.
+        """
+        return self.filter(
+            target__sense__isnull=True,
+            question__sense__isnull=True,
+            disambiguated__isnull=True,
+            prob__gt=F('target__domain__min_inference_probability'),
+        ).filter(
+            Q(inference_depth__isnull=True)|\
+            Q(inference_depth__lte=F('target__domain__max_inference_depth'))
+        )
+
 class TargetQuestionWeight(models.Model):
     """
     Represents the association between a target and question.
     """
+    
+    objects = TargetQuestionWeightManager()
     
     target = models.ForeignKey(
         Target,
@@ -1567,6 +1874,21 @@ class TargetQuestionWeight(models.Model):
             indicates that the weight was entered by a user and that no rules
             were used.'''))
     
+    disambiguated = models.DateTimeField(
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False,
+        help_text=_('''The date/time when this weight had a less-ambiguous
+            version of it created. This will be blank for edges whose nodes
+            have no ambiguity.'''))
+    
+    created = models.DateTimeField(
+        auto_now_add=True,
+        blank=True,
+        null=True,
+        editable=False)
+        
     @property
     def normalized_weight(self):
         if not self.count:
@@ -1580,7 +1902,7 @@ class TargetQuestionWeight(models.Model):
         index_together = (
             ('target', 'question', 'weight'),
         )
-        ordering = ('-weight',)
+        ordering = ('-prob',)
     
     def __unicode__(self):
         return u'%s %s = %s' % (self.target.slug, self.question.slug, self.weight)
@@ -1699,6 +2021,12 @@ class FileImport(models.Model):
         editable=False,
         db_index=True)
     
+    created = models.DateTimeField(
+        auto_now_add=True,
+        blank=True,
+        null=True,
+        editable=False)
+        
     @property
     def done(self):
         return self.total_lines and self.current_line == self.total_lines
