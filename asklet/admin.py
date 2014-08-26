@@ -164,6 +164,7 @@ class TargetAdmin(ModelAdmin):
     
     list_filter = (
         'enabled',
+        ('sense', NullListFilter),
     )
     
     readonly_fields = (
@@ -172,8 +173,12 @@ class TargetAdmin(ModelAdmin):
         'language_name',
         'pos',
         'sense',
+        'get_all_extended_glosses',
     )
     
+    def lookup_allowed(self, key, value=None):
+        return True
+        
     def weights_count(self, obj):
         if not obj:
             return 0
@@ -234,6 +239,7 @@ class QuestionAdmin(ModelAdmin):
     
     list_filter = (
         'enabled',
+        ('sense', NullListFilter),
     )
     
     raw_id_fields = (

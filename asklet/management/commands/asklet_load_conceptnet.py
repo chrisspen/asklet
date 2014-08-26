@@ -159,14 +159,8 @@ def process(fn, part_name, domain_slug, commit_freq=10):
         line = line.decode('utf8')
         edge = ConceptNetEdge.from_string(line)
         
-        # Ignore languages we don't care about.
-        if domain.language:
-            subject_lang = models.extract_language_code(edge.start)
-            if subject_lang != domain.language:
-                continue
-            object_lang = models.extract_language_code(edge.end)
-            if object_lang != domain.language:
-                continue
+        subject_lang = models.extract_language_code(edge.start)
+        object_lang = models.extract_language_code(edge.end)
         
         # Ignore edges without sense.
         # Note, this skips an estimated 85% of edges.
@@ -182,34 +176,39 @@ def process(fn, part_name, domain_slug, commit_freq=10):
             try:
                 retry += 1
                 
-                target, _ = models.Target.objects.get_or_create(
-                    domain=domain,
-                    slug=edge.target_slug,
-                )
-                target.conceptnet_subject = edge.start
-                if edge.target_text:
-                    target.text = edge.target_text
-                target.enabled = True
-                target.save()
-                
-                question, _ = models.Question.objects.get_or_create(
-                    domain=domain,
-                    slug=edge.question_slug,
+                target = None
+                if not domain.language or subject_lang == domain.language:
+                    target, _ = models.Target.objects.get_or_create(
+                        domain=domain,
+                        slug=edge.target_slug,
                     )
-                question.conceptnet_predicate = edge.rel
-                question.conceptnet_object = edge.end
-                if edge.question_text:
-                    question.text = edge.question_text
-                question.enabled = True
-                question.save()
+                    target.conceptnet_subject = edge.start
+                    if edge.target_text:
+                        target.text = edge.target_text
+                    target.enabled = True
+                    target.save()
                 
-                weight, _ = models.TargetQuestionWeight.objects.get_or_create(
-                    target=target,
-                    question=question,
-                    defaults=dict(
-                        weight=edge.weight_int,
-                        count=1000,
-                    ))
+                question = None
+                if not domain.language or object_lang == domain.language:
+                    question, _ = models.Question.objects.get_or_create(
+                        domain=domain,
+                        slug=edge.question_slug,
+                        )
+                    question.conceptnet_predicate = edge.rel
+                    question.conceptnet_object = edge.end
+                    if edge.question_text:
+                        question.text = edge.question_text
+                    question.enabled = True
+                    question.save()
+                
+                if target and question:
+                    weight, _ = models.TargetQuestionWeight.objects.get_or_create(
+                        target=target,
+                        question=question,
+                        defaults=dict(
+                            weight=edge.weight_int,
+                            count=1000,
+                        ))
                     
                 break
                 

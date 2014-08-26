@@ -7,7 +7,7 @@ from collections import defaultdict
 
 from django.db import models, connection
 from django.db.transaction import commit_on_success, commit_manually, commit, rollback
-from django.db.models import Min, Max, Count, Sum, F, Q
+from django.db.models import Min, Max, Count, Sum, F, Q, Avg
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.utils.translation import ugettext_lazy as _
@@ -1328,6 +1328,25 @@ class Target(models.Model):
         return CODE_TO_ENGLISH_NAME[self.language]
     language_name.short_description = 'language'
     
+    @property
+    def total_prob(self):
+        aggs = self.weights.all().aggregate(Avg('prob'))
+        return aggs['prob__avg']
+    
+    def get_all_extended_glosses(self):
+        try:
+            if not self.sense:
+                return
+            q = TargetQuestionWeight.objects.filter(
+                target=self)
+            return ' '.join([self.sense.replace('_', ' ')] + [
+                _.question.sense.replace('_', ' ') if _.question.sense else _.question.word.replace('_', ' ')
+                for _ in q.iterator()
+            ])
+        except Exception as e:
+            return str(e)
+    get_all_extended_glosses.short_description = _('extended glosses')
+    
     def save(self, set_index=True, *args, **kwargs):
         if not self.id and set_index and SET_TARGET_INDEX:
             self.index = self.domain.targets.all().only('id').count()
@@ -1826,21 +1845,25 @@ class TargetQuestionWeightInference(models.Model):
 
 class TargetQuestionWeightManager(models.Manager):
     
-    def pending_ambiguous(self):
+    def pending_ambiguous(self, force=False):
         """
         Returns all ambiguous edges that haven't seen any attempt
         to disambiguate.
         """
-        return self.filter(
+        q = self.filter(
             target__sense__isnull=True,
             question__sense__isnull=True,
-            disambiguated__isnull=True,
-            disambiguation_success__isnull=True,
             prob__gt=F('target__domain__min_inference_probability'),
         ).filter(
             Q(inference_depth__isnull=True)|\
             Q(inference_depth__lte=F('target__domain__max_inference_depth'))
         )
+        if not force:
+            q = q.filter(
+                disambiguated__isnull=True,
+                disambiguation_success__isnull=True,
+            )
+        return q
 
 class TargetQuestionWeight(models.Model):
     """
