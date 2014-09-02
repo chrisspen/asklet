@@ -689,6 +689,18 @@ GROUP BY a.session_id, t.id
         Uses SQL to finds the next best question given current answers.
         """
         
+        usable_targets = self.usable_targets.only('id')
+        
+        session = Session.objects.get(id=session_id)
+        ranking_str = ''
+        #TODO:fix? actually slows down the query?
+#        if session.rankings.all().exists():
+#            # Restrict question analysis to those linked to actively ranked targets.
+#            ranking_str = 'AND r.id IS NOT NULL'
+#            usable_targets = usable_targets.filter(rankings__session__id=session_id)
+        
+        total_target_count = usable_targets.count()
+        
         only_target_ids_str = ''
         if only_target_ids and len(only_target_ids) <= 1000:
             only_target_ids_str = 'AND tqw.target_id IN (' + (','.join(map(str, only_target_ids))) + ')'
@@ -700,7 +712,6 @@ GROUP BY a.session_id, t.id
 #        print('%i enabled questions' % self.questions.filter(enabled=True).count())
 #        print('%i question weights' % TargetQuestionWeight.objects.filter(question__domain=self).count())
         
-        total_target_count = self.usable_targets.only('id').count()
         
         # We add the tangible weight sum to the implied sum of missing weights.
         # e.g. If we have 1000 targets but only 100 have weights for
@@ -726,11 +737,16 @@ FROM (
             asklet_answer AS a ON
             a.session_id = {session_id}
         AND a.question_id = tqw.question_id
+    LEFT OUTER JOIN
+            asklet_ranking AS r ON
+            r.session_id = {session_id}
+        AND r.target_id = tqw.target_id
     WHERE   q.enabled = CAST(1 AS bool)
         AND q.sense IS NOT NULL
         AND q.domain_id = {domain_id}
         {only_target_ids_str}
         {exclude_question_ids_str}
+        {ranking_str}
     GROUP BY q.id
 ) AS m
 WHERE m.weight_sum IS NOT NULL
@@ -743,6 +759,7 @@ LIMIT 1;
             missing_weight=self.assumption_weight,
             only_target_ids_str='',#only_target_ids_str,#TODO:re-enable?
             exclude_question_ids_str=exclude_question_ids_str,
+            ranking_str=ranking_str,
 #            sub_sql=sub_sql,
         )
         if verbose: print('question sql:',sql)
@@ -1077,10 +1094,13 @@ WHERE   r.target_id = s.target_id
             unranked_answer.ranked = True
             unranked_answer.save()
             
-            # Delete the lower N rankings.
-#            rankings_count = self.rankings.all().count()
-#            if rankings_count > 10:
-#                self.rankings.all().order_by('-ranking')[int(rankings_count/2.):].delete()
+            # Delete the lowest N rankings to speed up the eventual
+            # question-ranking.
+            #TODO:paramaterize count and ratio threshold?
+            rankings_count = self.rankings.all().count()
+            if rankings_count > 10:
+                low_rankings = self.rankings.all().order_by('-ranking')[int(rankings_count*0.75):]
+                Ranking.objects.filter(id__in=low_rankings.values_list('id', flat=True)).delete()
             
             if verbose:
                 print('final rankings:',self.rankings.all().count())
@@ -1111,13 +1131,6 @@ WHERE   r.target_id = s.target_id
             print('%i answers provided' % answers.count())
             print('prior failed guesses:',prior_failed_target_ids)
         
-#        prior_top_target_ids = self.get_top_targets_cache()
-        
-        # First mode.
-        # Rank targets according to the answers we've received so far.
-        # Described in section 0048.
-        #TODO:cache, so we don't have to iterate over millions of targets each time
-        #TODO:use a priority-dictionary?
         if verbose:
             #print('prior_top_target_ids:',len(prior_top_target_ids))
             print('Prior answers:')
@@ -1128,38 +1141,6 @@ WHERE   r.target_id = s.target_id
                     print(answer.guess.slug, answer.answer)
             print('')
         
-#        print('answers:',answers)
-        # Lookup and update cached target rankings.
-        #target_rankings = self.get_target_rankings_cache() # {target:rank}
-        
-        #TODO:remove, unnecessary?
-        # Purge failures from cached target rankings.
-#        print('cached target_rankings:',target_rankings)
-#        for _target in list(target_rankings.keys()):
-#            if _target.id in prior_failed_target_ids:
-#                del target_rankings[_target]
-#        print('updated cached target_rankings:',target_rankings)
-        
-        #prior_question_ids = self.get_prior_question_ids_cache()
-#        top_targets = self.domain.rank_targets(
-#            session=self,
-#            answers=dict(
-#                (answer.question.slug, answer.answer)
-#                for answer in answers
-#                if answer.question and answer.question.id not in prior_question_ids
-#            ),
-#            prior_failed_target_ids=prior_failed_target_ids,
-#            prior_top_target_ids=prior_top_target_ids,
-#            target_rankings=target_rankings,
-#            verbose=verbose,
-#        )
-#        print('refreshed top_targets:',top_targets)
-#        if top_targets:
-#            self.save_target_rankings_cache(top_targets)
-        #self.save_prior_question_ids_cache(answer.question.id for answer in answers if answer.question)
-        
-        #TODO:remove targets that have low weights, 0050
-        #trunc = int(len(top_targets)*0.1)
         if verbose:
 #            print('trunc:',trunc)
 #            print('%i top targets A' % len(top_targets))
@@ -1168,13 +1149,6 @@ WHERE   r.target_id = s.target_id
             print('%i total questions' % self.domain.questions.all().count())
             print('%i total enabled questions' % self.domain.usable_questions.count())
             print('%i failed targets' % len(prior_failed_target_ids))
-#        if trunc > 10:
-#            top_targets = top_targets[:trunc]
-#        if verbose:
-#            print('%i top targets b' % len(top_targets))
-#            for target,rank in top_targets:
-#                #print('top target:', rank, target)
-#                assert target.id not in prior_failed_target_ids
         
         # Create and maintain a cached list of the last N top targets.
         #TODO:convert this to a model field?
@@ -1363,7 +1337,7 @@ class Ranking(models.Model):
             ('session', 'target'),
         )
         ordering = (
-            'ranking',
+            '-ranking',
         )
 
 SET_TARGET_INDEX = True
