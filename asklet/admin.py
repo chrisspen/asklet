@@ -139,6 +139,22 @@ class TargetQuestionWeightInferenceAdmin(ModelAdmin):
 
 admin.site.register(models.TargetQuestionWeightInference, TargetQuestionWeightInferenceAdmin)
 
+class RankingAdmin(ModelAdmin):
+
+    list_display = (
+        'target',
+        'session',
+        'ranking',
+    )
+    
+    readonly_fields = (
+        'target',
+        'session',
+        'ranking',
+    )
+
+admin.site.register(models.Ranking, RankingAdmin)
+
 class TargetAdmin(ModelAdmin):
     
     list_display = (
@@ -174,6 +190,8 @@ class TargetAdmin(ModelAdmin):
         'pos',
         'sense',
         'get_all_extended_glosses',
+        'total_weights_aq',
+        'total_weights_uaq'
     )
     
     def lookup_allowed(self, key, value=None):
@@ -182,9 +200,10 @@ class TargetAdmin(ModelAdmin):
     def weights_count(self, obj):
         if not obj:
             return 0
-        return '<a href="/admin/asklet/targetquestionweight/?target=%i" class="button" target="_blank">View %i</a>' % (obj.id, obj.weights.all().count(),)
+        return '<a href="/admin/asklet/targetquestionweight/?target=%i" class="button" target="_blank">View %s</a>' % (obj.id, obj.total_weights,)
     weights_count.short_description = 'weights'
     weights_count.allow_tags = True
+    weights_count.admin_order_field = 'total_weights'
     
 admin.site.register(models.Target, TargetAdmin)
 
@@ -252,14 +271,17 @@ class QuestionAdmin(ModelAdmin):
         'language_name',
         'pos',
         'sense',
+        'total_weights_aq',
+        'total_weights_uaq'
     )
     
     def weights_count(self, obj):
         if not obj:
             return 0
-        return '<a href="/admin/asklet/targetquestionweight/?question=%i" class="button" target="_blank">View %i</a>' % (obj.id, obj.weights.all().count(),)
+        return '<a href="/admin/asklet/targetquestionweight/?question=%i" class="button" target="_blank">View %s</a>' % (obj.id, obj.total_weights,)
     weights_count.short_description = 'weights'
     weights_count.allow_tags = True
+    weights_count.admin_order_field = 'total_weights'
     
 admin.site.register(models.Question, QuestionAdmin)
 
@@ -385,6 +407,15 @@ class FileImportAdmin(ModelAdmin):
         'percent_str',
         'complete',
     )
+    
+    actions = (
+        'mark_incomplete',
+    )
+    
+    def mark_incomplete(self, request, queryset):
+        queryset.update(current_line=0, complete=False)
+    mark_incomplete.short_description = \
+        _('Mark selected %(verbose_name_plural)s incomplete')
     
 admin.site.register(models.FileImport, FileImportAdmin)
 

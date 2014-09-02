@@ -6,12 +6,14 @@ import uuid
 from collections import defaultdict
 
 from django.db import models, connection
-from django.db.transaction import commit_on_success, commit_manually, commit, rollback
+from django.db.transaction import commit, rollback, atomic
 from django.db.models import Min, Max, Count, Sum, F, Q, Avg
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.utils.translation import ugettext_lazy as _
 from django.utils import timezone
+
+#from picklefield.fields import PickledObjectField
 
 import six
 u = six.u
@@ -62,6 +64,9 @@ def calculate_target_rank_item2(local_weight, answer_weight):
     sign = ((them * us) > 0) * 2 - 1
     
     return sign*abs(them+us)/2.
+
+def calculate_target_rank_item3(local_weight, answer_weight):
+    return 4 - abs(local_weight - answer_weight)
 
 class Domain(models.Model):
     """
@@ -140,6 +145,14 @@ class Domain(models.Model):
     def __str__(self):
         return '<Domain: %s>' % (self.slug,)
     
+    @property
+    def usable_targets(self):
+        return self.targets.filter(enabled=True, sense__isnull=False)
+    
+    @property
+    def usable_questions(self):
+        return self.questions.filter(enabled=True, sense__isnull=False)
+        
     def create_target(self, slug):
         t, _ = Target.objects.get_or_create(
             domain=self,
@@ -163,7 +176,7 @@ class Domain(models.Model):
             target=t, question=q)
         return tq
     
-    @commit_on_success
+    @atomic
     def infer(self, limit=1000, continuous=True, target=None, verbose=False, iter_commit=True, rules=None):
         """
         Creates new weights based on all enabled inference rules.
@@ -363,7 +376,6 @@ class Domain(models.Model):
             if not dryrun:
                 commit()
     
-    #@commit_manually
     def purge(self, verbose=0):
         """
         Deletes all targets, questions and weights linked to the domain.
@@ -497,62 +509,28 @@ class Domain(models.Model):
             only_target_ids_str = 'AND t.id IN (' + (','.join(map(str, only_target_ids))) + ')'
         
         #TODO:apply world-assumption to SUM(), if weight missing, insert *WA_WEIGHT
-        # Note, see calculate_target_rank_item2() for the explanation of the rank formula.
+        # Note, see calculate_target_rank_item3() for the explanation of the rank formula.
         #sqlite/postgresql/mysql=coalesce
-#        sql = """
-#SELECT  s.id AS session_id,
-#        t.id AS target_id,
-#        SUM((tqw.nweight*a.answer-1+ABS(tqw.nweight*a.answer))/ABS(tqw.nweight*a.answer-1+ABS(tqw.nweight*a.answer))*ABS(tqw.nweight+a.answer)/2.) AS rank
-#FROM    asklet_session as s
-#LEFT OUTER JOIN asklet_answer AS a ON
-#        a.session_id = s.id
-#    AND a.guess_id IS NULL
-#LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
-#        a.question_id IS NOT NULL
-#    AND a.question_id = tqw.question_id
-#LEFT OUTER JOIN asklet_target AS t on
-#        t.id = tqw.target_id
-#LEFT OUTER JOIN asklet_question AS q on
-#        q.id = tqw.question_id
-#WHERE   s.id = {session_id}
-#    AND t.enabled = CAST(1 AS bool)
-#    AND q.enabled = CAST(1 AS bool)
-#    {question_ids_str}
-#    {exclude_target_ids_str}
-#    {only_target_ids_str}
-#GROUP BY s.id, t.id
-#ORDER BY rank DESC;
-#        """.format(
         sql = """
-SELECT  m.session_id,
-        m.target_id,
-        SUM(ABS((m.answer + m.nweight)/2.)*(CAST((m.nweight * m.answer) > 0 AS INT) * 2 - 1)) AS rank
-FROM (
-    SELECT  s.id AS session_id,
-            t.id AS target_id,
-            COALESCE(tqw.nweight, {assumption_weight}) AS nweight,
-            a.answer
-    FROM    asklet_target AS t
-    LEFT OUTER JOIN asklet_session AS s ON
-            s.id = {session_id}
-    LEFT OUTER JOIN asklet_answer AS a on
-            a.session_id = s.id
-        AND a.guess_id IS NULL
-    LEFT OUTER JOIN asklet_question AS q on
-            q.id = a.question_id
-    LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
-            tqw.question_id = a.question_id
-        AND tqw.target_id = t.id
-    WHERE   t.domain_id = {domain_id}
-        AND t.enabled = CAST(1 AS bool)
-        AND t.sense IS NOT NULL
-        AND q.enabled = CAST(1 AS bool)
-        AND q.sense IS NOT NULL
-        {question_ids_str}
-        {exclude_target_ids_str}
-        {only_target_ids_str}
-) AS m
-GROUP BY m.session_id, m.target_id
+SELECT  a.session_id,
+        t.id AS target_id,
+        SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) AS rank
+FROM    asklet_target AS t
+INNER JOIN asklet_answer AS a on
+        a.session_id = {session_id}
+    AND a.guess_id IS NULL
+    {question_ids_str}
+INNER JOIN asklet_question AS q on
+        q.id = a.question_id
+LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
+        tqw.question_id = a.question_id
+    AND tqw.target_id = t.id
+WHERE   t.domain_id = {domain_id}
+    AND t.enabled = CAST(1 AS bool)
+    AND t.sense IS NOT NULL
+    {exclude_target_ids_str}
+    {only_target_ids_str}
+GROUP BY a.session_id, t.id
 {order_by_str}
 {limit_str}
         """.format(
@@ -639,7 +617,8 @@ GROUP BY m.session_id, m.target_id
         top_targets = sorted(target_rankings.items(), key=lambda o:o[1], reverse=True)
         
         return top_targets
-        
+    
+    #TODO:deprecated, remote
     def rank_targets_python(self, session, answers, prior_failed_target_ids=[], prior_top_target_ids=[], target_rankings=None, verbose=False):
         """
         Returns a list of targets ordered from most likely to least likely
@@ -686,7 +665,8 @@ GROUP BY m.session_id, m.target_id
                 if verbose: print('\tanswer weight:', question_slug, answer_weight, local_weight)
 
                 #target_rankings[target] += calculate_target_rank_item1(
-                target_rankings[target] += calculate_target_rank_item2(
+                #target_rankings[target] += calculate_target_rank_item2(
+                target_rankings[target] += calculate_target_rank_item3(
                     local_weight=local_weight,
                     answer_weight=answer_weight)
                 
@@ -705,6 +685,9 @@ GROUP BY m.session_id, m.target_id
         return getattr(self, 'rank_questions_%s' % ranker)(*args, **kwargs)
     
     def _query_questionrankings(self, session_id, only_target_ids=[], exclude_question_ids=[], verbose=0):
+        """
+        Uses SQL to finds the next best question given current answers.
+        """
         
         only_target_ids_str = ''
         if only_target_ids and len(only_target_ids) <= 1000:
@@ -717,7 +700,7 @@ GROUP BY m.session_id, m.target_id
 #        print('%i enabled questions' % self.questions.filter(enabled=True).count())
 #        print('%i question weights' % TargetQuestionWeight.objects.filter(question__domain=self).count())
         
-        total_target_count = self.targets.only('id').filter(enabled=True).count()
+        total_target_count = self.usable_targets.only('id').count()
         
         # We add the tangible weight sum to the implied sum of missing weights.
         # e.g. If we have 1000 targets but only 100 have weights for
@@ -730,12 +713,9 @@ SELECT  m.question_id,
         m.weight_sum,
         m.target_count
 FROM (
+    -- Aggregate question_id -> sum(nweight)
     SELECT  q.id AS question_id,
-    
-            -- TODO:is this correct?
-            -- SUM(tqw.nweight) AS weight_sum,
             SUM(COALESCE(a.answer, tqw.nweight)) AS weight_sum,
-            
             COUNT(DISTINCT tqw.target_id) AS target_count
     FROM    asklet_question AS q
     LEFT OUTER JOIN
@@ -743,11 +723,8 @@ FROM (
             tqw.question_id = q.id
         AND tqw.weight IS NOT NULL
     LEFT OUTER JOIN
-            asklet_session AS s ON
-            s.id = {session_id}
-    LEFT OUTER JOIN
             asklet_answer AS a ON
-            a.session_id = s.id
+            a.session_id = {session_id}
         AND a.question_id = tqw.question_id
     WHERE   q.enabled = CAST(1 AS bool)
         AND q.sense IS NOT NULL
@@ -776,7 +753,7 @@ LIMIT 1;
             results.append((question_id, weight_sum_abs))
         return results
     
-    def rank_questions_sql(self, session, targets, previous_question_ids=[], verbose=True):
+    def rank_questions_sql(self, session, targets=[], previous_question_ids=[], verbose=True):
         results = self._query_questionrankings(
             session_id=session.id,
             only_target_ids=[_ if isinstance(_, int) else _.id for _ in targets],
@@ -792,51 +769,52 @@ LIMIT 1;
         # Lower rank means better splitting criteria.
         question_rankings = sorted(question_rankings.items(), key=lambda o: abs(o[1]))
         return question_rankings
-        
-    def rank_questions_python(self, session, targets, previous_question_ids=[], verbose=True):
-        """
-        Ranks questions from most helpful to least helpful.
-        """
-        
-        if verbose: print('questions0:',self.questions.all().count())
-        questions = Question.objects.askable(self.questions.all())
-        if verbose: print('askable0:',questions.count())
-        if previous_question_ids:
-            if verbose: print('previous_question_ids:',previous_question_ids)
-            questions = questions.exclude(id__in=previous_question_ids)
-        if verbose: print('askable1:',questions.count())
     
-        if verbose:
-            print('%i askable questions out of %i total questions and %i questions asked' \
-                % (
-                   questions.count(),
-                   self.questions.all().count(),
-                   len(previous_question_ids),
-                ))
-        splittable_questions = questions
-        if targets:
-            splittable_questions = questions.filter(
-                weights__id__isnull=False,
-                weights__target__in=targets).distinct()
-        question_rankings = defaultdict(int) # {question:rank}
-        #TODO:support closed-world assumption by counting targets without explicit weight and assuming weight=-4?
-        for question in splittable_questions.iterator():
-            for weight in question.weights.all().iterator():
-                
-                #TODO:use raw weight?
-                question_rankings[question] += 1 if weight.weight > 0 else -1
-                
-#                question_rankings[question] += weight.weight or 0
-                
-#                if not weight.count:
-#                    continue
-#                question_rankings[question] += weight.weight/float(weight.count)
-
-        if verbose: print('%i splittable questions' % splittable_questions.count())
-        #TODO:rank questions by finding the one with the most even YES/NO split, explained in 0053
-        # Lower rank means better splitting criteria.
-        question_rankings = sorted(question_rankings.items(), key=lambda o: abs(o[1]))
-        return question_rankings
+    #TODO:deprecated, remove
+#    def rank_questions_python(self, session, targets, previous_question_ids=[], verbose=True):
+#        """
+#        Ranks questions from most helpful to least helpful.
+#        """
+#        
+#        if verbose: print('questions0:',self.questions.all().count())
+#        questions = Question.objects.askable(self.questions.all())
+#        if verbose: print('askable0:',questions.count())
+#        if previous_question_ids:
+#            if verbose: print('previous_question_ids:',previous_question_ids)
+#            questions = questions.exclude(id__in=previous_question_ids)
+#        if verbose: print('askable1:',questions.count())
+#    
+#        if verbose:
+#            print('%i askable questions out of %i total questions and %i questions asked' \
+#                % (
+#                   questions.count(),
+#                   self.questions.all().count(),
+#                   len(previous_question_ids),
+#                ))
+#        splittable_questions = questions
+#        if targets:
+#            splittable_questions = questions.filter(
+#                weights__id__isnull=False,
+#                weights__target__in=targets).distinct()
+#        question_rankings = defaultdict(int) # {question:rank}
+#        #TODO:support closed-world assumption by counting targets without explicit weight and assuming weight=-4?
+#        for question in splittable_questions.iterator():
+#            for weight in question.weights.all().iterator():
+#                
+#                #TODO:use raw weight?
+#                question_rankings[question] += 1 if weight.weight > 0 else -1
+#                
+##                question_rankings[question] += weight.weight or 0
+#                
+##                if not weight.count:
+##                    continue
+##                question_rankings[question] += weight.weight/float(weight.count)
+#
+#        if verbose: print('%i splittable questions' % splittable_questions.count())
+#        #TODO:rank questions by finding the one with the most even YES/NO split, explained in 0053
+#        # Lower rank means better splitting criteria.
+#        question_rankings = sorted(question_rankings.items(), key=lambda o: abs(o[1]))
+#        return question_rankings
     
 class Session(models.Model):
     """
@@ -885,6 +863,12 @@ class Session(models.Model):
     
     created = models.DateTimeField(auto_now_add=True)
     
+#    target_rankings = PickledObjectField(
+#        blank=True,
+#        null=True,
+#        compress=True,
+#        help_text=_('Cached dictionary of {target_id:ranking}.'))
+    
     def question_count(self):
         return self.answers.all().count()
     question_count.short_description = 'questions'
@@ -894,9 +878,7 @@ class Session(models.Model):
         guessed_targets = self.answers\
             .filter(guess__isnull=False)\
             .values_list('guess_id', flat=True)
-        return self.domain.targets\
-            .filter(enabled=True)\
-            .exclude(id__in=guessed_targets)
+        return self.domain.usable_targets.exclude(id__in=guessed_targets)
     
     @property
     def minimum_question_count(self):
@@ -904,7 +886,7 @@ class Session(models.Model):
         The minimum number of questions the system is allowed to ask.
         """
         unguessed_target_count = self.unguessed_targets.count()
-        domain_question_count = self.domain.questions.filter(enabled=True).count()
+        domain_question_count = self.domain.usable_questions.count()
         return min(unguessed_target_count, domain_question_count-2)
     
     def __unicode__(self):
@@ -916,42 +898,201 @@ class Session(models.Model):
             question=question,
             answer=answer)
     
-    def get_top_targets_cache(self):
-        #TODO:save to filesystem cache keyed by session id
-        prior_top_target_ids = []
-        if hasattr(self, '_cached_prior_top_target_ids'):
-            prior_top_target_ids = self._cached_prior_top_target_ids
-        return prior_top_target_ids
+#    def get_top_targets_cache(self):
+#        #TODO:save to filesystem cache keyed by session id
+#        prior_top_target_ids = []
+#        if hasattr(self, '_cached_prior_top_target_ids'):
+#            prior_top_target_ids = self._cached_prior_top_target_ids
+#        return prior_top_target_ids
         
-    def clear_top_targets_cache(self):
-        #TODO:save to filesystem cache keyed by session id
-        self._cached_prior_top_target_ids = []
+#    def clear_top_targets_cache(self):
+#        #TODO:save to filesystem cache keyed by session id
+#        self._cached_prior_top_target_ids = []
+#    
+#    def save_top_targets_cache(self, lst):
+#        #TODO:save to filesystem cache keyed by session id
+#        self._cached_prior_top_target_ids = lst
+#    
+#    def get_target_rankings_cache(self):
+#        if hasattr(self, '_cached_target_rankings'):
+#            d = self._cached_target_rankings
+#            if not isinstance(d, dict):
+#                d = dict(d)
+#            return d
+#        return defaultdict(int)
+#    
+#    def save_target_rankings_cache(self, tr):
+#        if not isinstance(tr, dict):
+#            d = defaultdict(int)
+#            d.update(tr)
+#        self._cached_target_rankings = tr
+#    
+#    def get_prior_question_ids_cache(self):
+#        if hasattr(self, '_cached_prior_question_ids'):
+#            return self._cached_prior_question_ids
+#        return []
+#    
+#    #TODO:deprecated, remove
+#    def save_prior_question_ids_cache(self, lst):
+#        self._cached_prior_question_ids = lst
     
-    def save_top_targets_cache(self, lst):
-        #TODO:save to filesystem cache keyed by session id
-        self._cached_prior_top_target_ids = lst
-    
-    def get_target_rankings_cache(self):
-        if hasattr(self, '_cached_target_rankings'):
-            d = self._cached_target_rankings
-            if not isinstance(d, dict):
-                d = dict(d)
-            return d
-        return defaultdict(int)
-    
-    def save_target_rankings_cache(self, tr):
-        if not isinstance(tr, dict):
-            d = defaultdict(int)
-            d.update(tr)
-        self._cached_target_rankings = tr
-    
-    def get_prior_question_ids_cache(self):
-        if hasattr(self, '_cached_prior_question_ids'):
-            return self._cached_prior_question_ids
-        return []
+    @atomic
+    def update_target_rankings(self, verbose=0):
+        """
+        Recalculates the target ranking records given the currently
+        answered questions.
+        """
         
-    def save_prior_question_ids_cache(self, lst):
-        self._cached_prior_question_ids = lst
+        # Delete rankings of failed target guesses?
+        incorrect_targets = self.incorrect_targets
+        if incorrect_targets:
+            expired_rankings = self.rankings.filter(target__in=incorrect_targets)
+            if verbose:
+                print('%i expired_rankings' % expired_rankings.count())
+            expired_rankings.delete()
+        exclude_target_ids = [0] + list(incorrect_targets.values_list('id', flat=True))
+        exclude_target_id_str = ','.join(map(str, exclude_target_ids))
+        
+        # Incrementally update ranking one question at a time.
+        unranked_answers = self.answers.filter(ranked=False, question__isnull=False)
+        for unranked_answer in unranked_answers.iterator():
+            manually_update = False
+            first = self.answers.count() == 1
+            if first:
+                # Ensure all prior rankings for this session are deleted.
+                self.rankings.all().delete()
+                # For the first interation, insert the initial ranking records.
+                sql = """
+INSERT INTO asklet_ranking (session_id, target_id, ranking)
+SELECT  a.session_id,
+        t.id,
+        SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight})))
+FROM    asklet_target AS t
+INNER JOIN asklet_answer AS a on
+        a.session_id = {session_id}
+    AND a.guess_id IS NULL
+    AND a.question_id = {question_id}
+INNER JOIN asklet_question AS q on
+        q.id = a.question_id
+LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
+        tqw.question_id = a.question_id
+    AND tqw.target_id = t.id
+WHERE   t.domain_id = {domain_id}
+    AND t.enabled = CAST(1 AS bool)
+    AND t.sense IS NOT NULL
+    AND t.id NOT IN ({exclude_target_ids})
+GROUP BY a.session_id, t.id;
+                """.format(
+                    session_id=self.id,
+                    domain_id=self.domain.id,
+                    question_id=unranked_answer.question.id,
+                    assumption_weight=self.domain.assumption_weight,
+                    exclude_target_ids=exclude_target_id_str,
+                )
+            else:
+                # For subsequent iterations, update the existing records.
+                if 'sqlite' in settings.DATABASES['default']['ENGINE']:
+                    sql = """
+SELECT  a.session_id,
+        t.id AS target_id,
+        SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) AS ranking
+FROM    asklet_target AS t
+INNER JOIN asklet_answer AS a on
+        a.session_id = {session_id}
+    AND a.guess_id IS NULL
+    AND a.question_id = {question_id}
+INNER JOIN asklet_question AS q on
+        q.id = a.question_id
+LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
+        tqw.question_id = a.question_id
+    AND tqw.target_id = t.id
+WHERE   t.domain_id = {domain_id}
+    AND t.enabled = CAST(1 AS bool)
+    AND t.sense IS NOT NULL
+    AND t.id NOT IN ({exclude_target_ids})
+GROUP BY a.session_id, t.id
+                    """.format(
+                        session_id=self.id,
+                        domain_id=self.domain.id,
+                        question_id=unranked_answer.question.id,
+                        assumption_weight=self.domain.assumption_weight,
+                        exclude_target_ids=exclude_target_id_str,
+                    )
+                    manually_update = True
+                else:
+                    sql = """
+UPDATE asklet_ranking AS r
+SET ranking += s.ranking
+FROM (
+    SELECT  a.session_id,
+            t.id AS target_id,
+            SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) AS ranking
+    FROM    asklet_target AS t
+    INNER JOIN asklet_answer AS a on
+            a.session_id = {session_id}
+        AND a.guess_id IS NULL
+        AND a.question_id = {question_id}
+    INNER JOIN asklet_question AS q on
+            q.id = a.question_id
+    LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
+            tqw.question_id = a.question_id
+        AND tqw.target_id = t.id
+    WHERE   t.domain_id = {domain_id}
+        AND t.enabled = CAST(1 AS bool)
+        AND t.sense IS NOT NULL
+        AND t.id NOT IN ({exclude_target_ids})
+    GROUP BY a.session_id, t.id
+) AS s
+WHERE   r.target_id = s.target_id
+    AND r.session_id = s.session_id;
+                    """.format(
+                        session_id=self.id,
+                        domain_id=self.domain.id,
+                        question_id=unranked_answer.question.id,
+                        assumption_weight=self.domain.assumption_weight,
+                        exclude_target_ids=exclude_target_id_str,
+                    )
+            if verbose:
+                print('~'*80)
+                print('update_target_rankings sql:\n',sql)
+                #raw_input('enter')#TODO:remove
+            cursor = connection.cursor()
+            cursor.execute(sql)
+            
+            # Only necessary for Sqlite3 used during unittesting...
+            if manually_update:
+                for session_id, target_id, ranking in cursor:
+                    #print(session_id, target_id, ranking)
+                    r, _ = Ranking.objects.get_or_create(
+                        session_id=session_id,
+                        target_id=target_id,
+                        defaults=dict(ranking=0))
+                    old_ranking = r.ranking
+                    r.ranking += ranking
+                    r.save()
+                    if verbose:
+                        print('sqlite3.ranking.updated %s: %s->%s' % (r.target, old_ranking, r.ranking))
+            
+            # Mark answer as ranked.
+            unranked_answer.ranked = True
+            unranked_answer.save()
+            
+            # Delete the lower N rankings.
+#            rankings_count = self.rankings.all().count()
+#            if rankings_count > 10:
+#                self.rankings.all().order_by('-ranking')[int(rankings_count/2.):].delete()
+            
+            if verbose:
+                print('final rankings:',self.rankings.all().count())
+            
+            #commit()#unnecessary with atomic()
+    
+    @property
+    def incorrect_targets(self):
+        """
+        Returns a queryset of targets that were guessed but were incorrect.
+        """
+        return Target.objects.filter(id__in=self.answers.filter(guess__isnull=False).values_list('guess_id', flat=True))
     
     def get_next_question(self, verbose=0):
         """
@@ -960,13 +1101,17 @@ class Session(models.Model):
         if not self.winner is None:
             return
         
+        self.update_target_rankings(verbose=verbose)
+        
         answers = self.answers.all()
-        prior_failed_target_ids = set(self.answers.filter(guess__isnull=False).values_list('guess_id', flat=True))
+        prior_failed_target_ids = set(self.incorrect_targets.values_list('id', flat=True))
         if verbose:
+            print()
+            print('%i rankings' % self.rankings.all().count())
             print('%i answers provided' % answers.count())
             print('prior failed guesses:',prior_failed_target_ids)
         
-        prior_top_target_ids = self.get_top_targets_cache()
+#        prior_top_target_ids = self.get_top_targets_cache()
         
         # First mode.
         # Rank targets according to the answers we've received so far.
@@ -974,7 +1119,7 @@ class Session(models.Model):
         #TODO:cache, so we don't have to iterate over millions of targets each time
         #TODO:use a priority-dictionary?
         if verbose:
-            print('prior_top_target_ids:',len(prior_top_target_ids))
+            #print('prior_top_target_ids:',len(prior_top_target_ids))
             print('Prior answers:')
             for answer in answers:
                 if answer.question:
@@ -985,62 +1130,67 @@ class Session(models.Model):
         
 #        print('answers:',answers)
         # Lookup and update cached target rankings.
-        target_rankings = self.get_target_rankings_cache() # {target:rank}
+        #target_rankings = self.get_target_rankings_cache() # {target:rank}
         
         #TODO:remove, unnecessary?
         # Purge failures from cached target rankings.
 #        print('cached target_rankings:',target_rankings)
-        for _target in list(target_rankings.keys()):
-            if _target.id in prior_failed_target_ids:
-                del target_rankings[_target]
+#        for _target in list(target_rankings.keys()):
+#            if _target.id in prior_failed_target_ids:
+#                del target_rankings[_target]
 #        print('updated cached target_rankings:',target_rankings)
         
-        prior_question_ids = self.get_prior_question_ids_cache()
-        top_targets = self.domain.rank_targets(
-            session=self,
-            answers=dict(
-                (answer.question.slug, answer.answer)
-                for answer in answers
-                if answer.question and answer.question.id not in prior_question_ids
-            ),
-            prior_failed_target_ids=prior_failed_target_ids,
-            prior_top_target_ids=prior_top_target_ids,
-            target_rankings=target_rankings,
-            verbose=verbose,
-        )
+        #prior_question_ids = self.get_prior_question_ids_cache()
+#        top_targets = self.domain.rank_targets(
+#            session=self,
+#            answers=dict(
+#                (answer.question.slug, answer.answer)
+#                for answer in answers
+#                if answer.question and answer.question.id not in prior_question_ids
+#            ),
+#            prior_failed_target_ids=prior_failed_target_ids,
+#            prior_top_target_ids=prior_top_target_ids,
+#            target_rankings=target_rankings,
+#            verbose=verbose,
+#        )
 #        print('refreshed top_targets:',top_targets)
-        if top_targets:
-            self.save_target_rankings_cache(top_targets)
-        self.save_prior_question_ids_cache(answer.question.id for answer in answers if answer.question)
+#        if top_targets:
+#            self.save_target_rankings_cache(top_targets)
+        #self.save_prior_question_ids_cache(answer.question.id for answer in answers if answer.question)
         
         #TODO:remove targets that have low weights, 0050
-        trunc = int(len(top_targets)*0.1)
+        #trunc = int(len(top_targets)*0.1)
         if verbose:
-            print('trunc:',trunc)
-            print('%i top targets A' % len(top_targets))
+#            print('trunc:',trunc)
+#            print('%i top targets A' % len(top_targets))
             print('%i total targets' % self.domain.targets.all().count())
-            print('%i total enabled targets' % self.domain.targets.filter(enabled=True).count())
+            print('%i total enabled targets' % self.domain.usable_targets.count())
             print('%i total questions' % self.domain.questions.all().count())
-            print('%i total enabled questions' % self.domain.questions.filter(enabled=True).count())
-        if trunc > 10:
-            top_targets = top_targets[:trunc]
-        if verbose:
-            print('%i top targets b' % len(top_targets))
+            print('%i total enabled questions' % self.domain.usable_questions.count())
+            print('%i failed targets' % len(prior_failed_target_ids))
+#        if trunc > 10:
+#            top_targets = top_targets[:trunc]
+#        if verbose:
+#            print('%i top targets b' % len(top_targets))
 #            for target,rank in top_targets:
 #                #print('top target:', rank, target)
 #                assert target.id not in prior_failed_target_ids
         
         # Create and maintain a cached list of the last N top targets.
+        #TODO:convert this to a model field?
         if not hasattr(self, '_cached_last_top_targets'):
             self._cached_last_top_targets = []
         last_top_targets = self._cached_last_top_targets
-        if top_targets:
-            last_top_targets.append(top_targets[0][0])
         
         last_top_targets_n = self.domain.top_n_guess
         
-        unguessed_targets = self.domain.targets.filter(enabled=True).exclude(id__in=prior_failed_target_ids).exists()
-#        print('unguessed_targets:',unguessed_targets)
+        unguessed_targets = self.unguessed_targets
+        if verbose:
+            print('unguessed_targets:',unguessed_targets.count())
+        unguessed_rankings = self.rankings.exclude(target__id__in=prior_failed_target_ids).order_by('-ranking')
+        
+        if unguessed_rankings:
+            last_top_targets.append(unguessed_rankings[0].target)
         
         # Check for cases where we want to guess the target instead
         # of asking a question.
@@ -1052,37 +1202,44 @@ class Session(models.Model):
             # Clear the cached list, so if we're wrong, we won't re-recommend
             # the same target.
             self._cached_last_top_targets = []
-            self.clear_top_targets_cache()
+#            self.clear_top_targets_cache()
             if verbose: print('top_target case 1:',top_target)
             return top_target
-        elif not top_targets and not unguessed_targets:#self.domain.targets.filter(enabled=True).count() and answers.count():
+        elif not unguessed_targets:
             # If we've exhausted all targets, which should only happen
             # for trivially small domains, then give up.
-            if verbose: print('top_target case 2:',top_targets)
+            if verbose: print('top_target case 2:')
             return
-        elif len(top_targets) == 1:
+        elif len(unguessed_rankings) == 1:
             # If there's only one target left, then forego futher questions
             # and just guess that target.
-            self.clear_top_targets_cache()
-            top_target = top_targets[0][0]
+#            self.clear_top_targets_cache()
+            top_target = unguessed_rankings[0].target
             if verbose: print('top_target case 3:',top_target)
             return top_target
-        elif top_targets and answers.count()+1 == self.domain.max_questions:
+        elif len(unguessed_targets) == 1:
+            # If there's only one target left, then forego futher questions
+            # and just guess that target.
+#            self.clear_top_targets_cache()
+            top_target = unguessed_targets[0]
+            if verbose: print('top_target case 3b:',top_target)
+            return top_target
+        elif unguessed_rankings and answers.count()+1 == self.domain.max_questions:
             # We only have one more question left, so make our best guess.
-            self.clear_top_targets_cache()
-            top_target = top_targets[0][0]
+#            self.clear_top_targets_cache()
+            top_target = unguessed_rankings[0].target
             if verbose: print('top_target case 4:',top_target)
             return top_target
         
-        if top_targets:
-            self.save_top_targets_cache(list(target.id for target,rank in top_targets))
+#        if top_targets:
+#            self.save_top_targets_cache(list(target.id for target,rank in top_targets))
         
         # Second mode.
         previous_question_ids = self.answers.filter(question__isnull=False).values_list('question_id', flat=True)
         #print('previous_question_ids:',previous_question_ids)
         question_rankings = self.domain.rank_questions(
             session=self,
-            targets=[_1 for _1,_2 in top_targets],
+            #targets=[_1 for _1,_2 in top_targets],
             previous_question_ids=previous_question_ids,
             verbose=verbose)
         if verbose: print('%i question rankings' % len(question_rankings))
@@ -1156,7 +1313,7 @@ class Session(models.Model):
         
         self.save()
         
-    @commit_on_success
+    @atomic
     def merge(self, verbose=0):
         """
         Adds the weight of all answers into the domain's master weight matrix.
@@ -1187,6 +1344,27 @@ class Session(models.Model):
                 raise Exception('No question but no guess?')
             
         self.merged = True
+        
+#        commit()
+
+class Ranking(models.Model):
+    """
+    Caches target rankings for each session.
+    """
+    
+    session = models.ForeignKey('Session', related_name='rankings')
+    
+    target = models.ForeignKey('Target', related_name='rankings')
+    
+    ranking = models.FloatField(db_index=True)
+    
+    class Meta:
+        unique_together = (
+            ('session', 'target'),
+        )
+        ordering = (
+            'ranking',
+        )
 
 SET_TARGET_INDEX = True
 
@@ -1309,10 +1487,45 @@ class Target(models.Model):
         null=True,
         editable=False)
 
+    total_weights = models.PositiveIntegerField(
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False,
+        help_text=_('''Cached count of the total weights linked to this
+            target from the subject.'''),
+    )
+    
+    total_weights_aq = models.PositiveIntegerField(
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False,
+        verbose_name=_('total weights (ambiguous)'),
+        help_text=_('''Cached count of the total weights linked to this
+            target from the subject with an ambiguous question.'''),
+    )
+    
+    total_weights_uaq = models.PositiveIntegerField(
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False,
+        verbose_name=_('total weights (unambiguous)'),
+        help_text=_('''Cached count of the total weights linked to this
+            target from the subject with an un-ambiguous question.'''),
+    )
+    
+#    stats_last_updated = models.DateTimeField(
+#        blank=True,
+#        null=True,
+#        editable=False,
+#        help_text=_('The last time of weight counts were updated.'))
+
     class Meta:
         unique_together = (
             ('domain', 'slug'),
-            ('domain', 'index'),
+#            ('domain', 'index'),
             ('domain', 'conceptnet_subject'),
         )
     
@@ -1346,7 +1559,7 @@ class Target(models.Model):
         except Exception as e:
             return str(e)
     get_all_extended_glosses.short_description = _('extended glosses')
-    
+
     def save(self, set_index=True, *args, **kwargs):
         if not self.id and set_index and SET_TARGET_INDEX:
             self.index = self.domain.targets.all().only('id').count()
@@ -1368,7 +1581,16 @@ class Target(models.Model):
             
         if self.slug_parts is None:
             self.slug_parts = self.slug.count('/')
-            
+        
+        if self.total_weights is None:
+            self.total_weights = self.weights.all().count()
+        
+        if self.total_weights_uaq is None:
+            self.total_weights_uaq  = self.weights.filter(question__sense__isnull=False).count()
+        
+        if self.total_weights_aq is None:
+            self.total_weights_aq  = self.weights.filter(question__sense__isnull=True).count()
+        
         super(Target, self).save(*args, **kwargs)
 
 class TargetMissing(models.Model):
@@ -1462,8 +1684,8 @@ class Question(models.Model):
     
     slug = models.CharField(
         max_length=500,
-        blank=False,
-        null=False,
+        blank=True,
+        null=True,
         db_index=True)
     
     slug_parts = models.PositiveIntegerField(
@@ -1489,14 +1711,16 @@ class Question(models.Model):
         db_index=True,
         blank=True,
         null=True,
-        help_text=_('The URI of the predicate in ConceptNet5.'))
+        verbose_name=_('predicate'),
+        help_text=_('The URI of the predicate.'))
     
     conceptnet_object = models.CharField(
         max_length=500,
         db_index=True,
         blank=True,
         null=True,
-        help_text=_('The URI of the object in ConceptNet5.'))
+        verbose_name=_('object'),
+        help_text=_('The URI of the object.'))
     
     language = models.CharField(
         max_length=2,
@@ -1538,6 +1762,35 @@ class Question(models.Model):
         blank=True,
         null=True,
         editable=False)
+
+    total_weights = models.PositiveIntegerField(
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False,
+        help_text=_('''Cached count of the total weights linked to this
+            question.'''),
+    )
+    
+    total_weights_aq = models.PositiveIntegerField(
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False,
+        verbose_name=_('total weights (ambiguous)'),
+        help_text=_('''Cached count of the total weights linked to this
+            question with an ambiguous target.'''),
+    )
+    
+    total_weights_uaq = models.PositiveIntegerField(
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False,
+        verbose_name=_('total weights (unambiguous)'),
+        help_text=_('''Cached count of the total weights linked to this
+            question with an un-ambiguous question.'''),
+    )
     
     class Meta:
         unique_together = (
@@ -1547,12 +1800,14 @@ class Question(models.Model):
         )
     
     def __unicode__(self):
-        #return self.text or self.slug
-        return self.slug
+        if not self.slug and self.text:
+            return self.conceptnet_predicate + ' ' + self.text[:50].strip() + '...'
+        return self.slug or str(self.id)
     
     def __str__(self):
-        #return u(self.text or self.slug)
-        return self.slug
+        if not self.slug and self.text:
+            return self.conceptnet_predicate + ' ' + self.text[:50].strip() + '...'
+        return self.slug or str(self.id)
         
     def language_name(self):
         if not self.language:
@@ -1561,10 +1816,11 @@ class Question(models.Model):
     language_name.short_description = 'language'
     
     def save(self, set_index=True, *args, **kwargs):
+        
         if not self.id and set_index and SET_QUESTION_INDEX:
             self.index = self.domain.questions.all().only('id').count()
         
-        if '/' in self.slug and ',' in self.slug:
+        if self.slug and '/' in self.slug and ',' in self.slug:
             if not self.conceptnet_predicate:
                 self.conceptnet_predicate = self.slug.split(',')[0]
             if not self.conceptnet_object:
@@ -1582,8 +1838,17 @@ class Question(models.Model):
         if not self.word:
             self.word = extract_word(self.conceptnet_object)
             
-        if self.slug_parts is None:
+        if self.slug and self.slug_parts is None:
             self.slug_parts = self.slug.count('/')
+        
+        if self.total_weights is None:
+            self.total_weights = self.weights.all().count()
+        
+        if self.total_weights_uaq is None:
+            self.total_weights_uaq  = self.weights.filter(target__sense__isnull=False).count()
+        
+        if self.total_weights_aq is None:
+            self.total_weights_aq  = self.weights.filter(target__sense__isnull=True).count()
         
         super(Question, self).save(*args, **kwargs)
 
@@ -1828,7 +2093,15 @@ class TargetQuestionWeightInference(models.Model):
         null=False,
         editable=False,
         verbose_name=_('argument IDs'),
-        help_text=_('''List of IDs of the arguments matching the
+        help_text=_('''List of weight IDs matching the
+            rule\'s left-hand-side.'''))
+    
+    argument_weights = models.ManyToManyField(
+        'TargetQuestionWeight',
+        blank=True,
+        null=True,
+        verbose_name=_('arguments'),
+        help_text=_('''List weights matching the
             rule\'s left-hand-side.'''))
     
     @property
@@ -1912,6 +2185,19 @@ class TargetQuestionWeight(models.Model):
         db_index=True,
         help_text=_('The normalized weight scaled to [0:1].'))
     
+    text = models.TextField(
+        blank=True,
+        null=True,
+        help_text=_('''A user-friendly presentation of the triple.
+            Stores the surface-text if this weight comes from ConceptNet.'''))
+    
+#    conceptnet_uri = models.CharField(
+#        max_length=500,
+#        blank=True,
+#        null=True,
+#        db_index=True,
+#        editable=False)
+    
     inference_depth = models.PositiveIntegerField(
         blank=True,
         null=True,
@@ -1981,8 +2267,27 @@ class TargetQuestionWeight(models.Model):
             self.prob = None
             self.nweight = None
         
+        is_new = not self.id
+        
         super(TargetQuestionWeight, self).save(*args, **kwargs)
-    
+        
+        # Incrementally update target weight counts.
+        if is_new:
+            
+            target_q = Target.objects.filter(id=self.target.id)
+            target_q.update(total_weights=F('total_weights')+1)
+            if self.question.sense:
+                target_q.update(total_weights_uaq=F('total_weights_uaq')+1)
+            else:
+                target_q.update(total_weights_aq=F('total_weights_aq')+1)
+            
+            question_q = Question.objects.filter(id=self.question.id)
+            question_q.update(total_weights=F('total_weights')+1)
+            if self.target.sense:
+                question_q.update(total_weights_uaq=F('total_weights_uaq')+1)
+            else:
+                question_q.update(total_weights_aq=F('total_weights_aq')+1)
+
 class Answer(models.Model):
     """
     The user's response to a question or guess in a session.
@@ -2025,6 +2330,12 @@ class Answer(models.Model):
         null=True,
         editable=False,
         db_index=True)
+        
+    ranked = models.BooleanField(
+        default=False,
+        editable=False,
+        help_text=_('''If true, indicate this answer was used to update
+            rankings. False otherwise.'''))
     
     class Meta:
         ordering = ('id',)

@@ -1,4 +1,5 @@
 #!/usr/bin/python
+from __future__ import print_function
 import random
 import datetime
 import os
@@ -27,11 +28,23 @@ class Command(BaseCommand):
     option_list = BaseCommand.option_list + (
         make_option('--seed', default=None),
         make_option('--pause', action='store_true', default=False),
-        make_option('--dryrun', action='store_true', default=False),
+        make_option(
+            '--dryrun',
+            action='store_true',
+            default=False,
+            help="If specified, no changes to the database are made."),
         make_option('--verbose', action='store_true', default=False),
-        make_option('--max-sessions', default=1000),
+        make_option(
+            '--max-sessions',
+            default=1000,
+            help="The total games to play."),
         make_option('--domain', default='test'),
+        make_option('--target', default=''),
         make_option('--matrix', default=''),
+        make_option(
+            '--max-questions',
+            default=0,
+            help="The maximum number of questions to allow per game."),
         )
     
     def print_(self, *args):
@@ -39,15 +52,20 @@ class Command(BaseCommand):
             sys.stdout.write(' '.join(map(str, args)))
             sys.stdout.write('\n')
     
-    @commit_manually
+    @commit_on_success
     def handle(self, *args, **options):
         if options['seed']:
             random.seed(int(options['seed']))
         
         self.dryrun = options['dryrun']
         
-        domains = models.Domain.objects.all()
+        self.target = options['target'].strip()
+        
+        #domains = models.Domain.objects.all()
         self.domain = models.Domain.objects.get(slug=options['domain'])
+        
+        self.max_questions = int(options['max_questions'])
+        self.max_questions = self.max_questions or self.domain.max_questions
         
         self.verbose = options['verbose']
         self.pause = options['pause']
@@ -87,6 +105,9 @@ class Command(BaseCommand):
             settings.DEBUG = tmp_debug
         print('')
 #        print('win history:',win_history)
+        
+        avg_steps = sum(steps for _, steps, _ in self.progress)/float(len(self.progress))
+        print('Average steps:', avg_steps)
         print('Done!')
         
         if self.dryrun:
@@ -108,13 +129,16 @@ class Command(BaseCommand):
         
         self.total_count += 1
         
-        user.think_of_something()
+        if self.target:
+            user.set_target_from_slug(self.target)
+        else:
+            user.think_of_something()
         print_('User thinks of %s.' % user.target)
         
         winner = None
         try:
             prior_question_slugs = set()
-            for j in xrange(domain.max_questions):
+            for j in xrange(self.max_questions):
                 guess = None
                 things = []
                 print_('-'*80)
@@ -168,7 +192,11 @@ class Command(BaseCommand):
                 else:
                     raise Exception('Unknown type: %s' % (q,))
                 
-            session.record_result(guess=guess, actual=user.target, merge=True, attrs=things)
+            session.record_result(
+                guess=guess,
+                actual=user.target,
+                merge=True,
+                attrs=things)
             
         finally:
             if not self.dryrun:

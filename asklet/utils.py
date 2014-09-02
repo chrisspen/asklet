@@ -29,14 +29,25 @@ class BaseUser(object):
     """
     
     def __init__(self):
-        self.target = None
+        self._target = None
         
     def think_of_something(self):
         """
         Randomly choices a target for the system to guess.
         """
         raise NotImplementedError
+    
+    @property
+    def target(self):
+        return self._target
         
+    @target.setter
+    def target(self, v):
+        self._target = v
+    
+    def set_target_from_slug(self, slug):
+        self.target = slug
+    
     def ask(self, question_slug):
         """
         Returns the user's belief in the question's relation
@@ -125,7 +136,12 @@ class DomainUser(BaseUser):
         """
         Randomly choices a target for the system to guess.
         """
+        # Note, unlike the MatrixUser, we store our target
+        # as a Target model instance.
         self.target = self.domain.targets.all().order_by('?')[0]
+        
+    def set_target_from_slug(self, slug):
+        self.target = self.domain.targets.filter(slug=slug)[0]
         
     def ask(self, question_slug):
         """
@@ -203,6 +219,10 @@ class ShellUser(BaseUser):
             print('Please enter a simple non-empty string with no punctuation.')
         print('You are thinking of %s.' % target)
         self.target = target
+    
+    def set_target_from_slug(self, slug):
+        # The shell user is an actual person, so we can't overide their choice.
+        raise NotImplementedError, "Don't tell me what to do!"
         
     def ask(self, question_slug):
         """

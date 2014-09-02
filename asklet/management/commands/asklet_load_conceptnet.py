@@ -181,10 +181,11 @@ def process(fn, part_name, domain_slug, commit_freq=10):
                     target, _ = models.Target.objects.get_or_create(
                         domain=domain,
                         slug=edge.target_slug,
+                        defaults=dict(
+                            text=edge.target_text
+                        )
                     )
                     target.conceptnet_subject = edge.start
-                    if edge.target_text:
-                        target.text = edge.target_text
                     target.enabled = True
                     target.save()
                 
@@ -193,11 +194,12 @@ def process(fn, part_name, domain_slug, commit_freq=10):
                     question, _ = models.Question.objects.get_or_create(
                         domain=domain,
                         slug=edge.question_slug,
+                        defaults=dict(
+                            text=edge.question_text
                         )
+                    )
                     question.conceptnet_predicate = edge.rel
                     question.conceptnet_object = edge.end
-                    if edge.question_text:
-                        question.text = edge.question_text
                     question.enabled = True
                     question.save()
                 
@@ -209,6 +211,8 @@ def process(fn, part_name, domain_slug, commit_freq=10):
                             weight=edge.weight_int,
                             count=1000,
                         ))
+                    weight.text = edge.surfaceText
+                    weight.save()
                     
                 break
                 

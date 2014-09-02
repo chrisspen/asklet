@@ -14,6 +14,7 @@ def get_reqs(testing=False):
         'PyYAML>=3.11',
         'ConceptNet',
         'django-admin-steroids>=0.2.14',
+        #'django-picklefield>=0.3.1',
     ]
     if testing:
         reqs.extend([

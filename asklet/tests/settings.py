@@ -5,6 +5,7 @@ SITE_ID = 1
 DATABASES = {
     'default':{
         'ENGINE': 'django.db.backends.sqlite3',
+        'ATOMIC_REQUESTS': True
     }
 }
 ROOT_URLCONF = 'asklet.tests.urls'
@@ -43,6 +44,7 @@ MIDDLEWARE_CLASSES = (
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     #'middleware.usercontext.UserContextMiddleware',
+#    'django.middleware.transaction.TransactionMiddleware',
 )
 
 ADMIN_MEDIA_PREFIX = '/media/admin/'

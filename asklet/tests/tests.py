@@ -4,9 +4,10 @@ import random
 import time
 from collections import defaultdict
 
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 from django.db.utils import IntegrityError
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 from django.conf import settings
 from django.core.management import call_command
@@ -22,6 +23,8 @@ from asklet import models
 from asklet import constants as c
 from asklet import utils
 
+#Throws: TransactionManagementError: Your database backend doesn't behave properly when autocommit is off. Turn it on before using 'atomic'.
+#class Tests(TransactionTestCase):
 class Tests(TestCase):
     
     fixtures = ['test_data.yaml']
@@ -33,7 +36,7 @@ class Tests(TestCase):
         
         # Ensure backends are reset to defaults.
         settings.ASKLET_BACKEND = c.SQL
-        settings.ASKLET_RANKER = c.PYTHON
+        settings.ASKLET_RANKER = c.SQL
     
     def test_models(self):
         domain = models.Domain.objects.create(slug='_test')
@@ -93,11 +96,11 @@ class Tests(TestCase):
         self.assertEqual(len(weights), 3)
         self.assertTrue(weights[0].weight)
         
-        q1 = models.Question.objects.create(domain=domain, slug='/r/IsA/,/c/en/has_fur/n/has_fur')
-        #q2 = models.Question.objects.create(domain=domain, slug='has_wings')
-        #q3 = models.Question.objects.create(domain=domain, slug='barks')
-        bat = models.Target.objects.create(domain=domain, slug='/c/en/bat/n/bat')
-        rat = models.Target.objects.create(domain=domain, slug='/c/en/rat/n/rat')
+        q1 = models.Question.objects.create(domain=domain, slug='/r/IsA/,/c/en/has_fur/n/has_fur', enabled=True)
+        #q2 = models.Question.objects.create(domain=domain, slug='has_wings', enabled=True)
+        #q3 = models.Question.objects.create(domain=domain, slug='barks', enabled=True)
+        bat = models.Target.objects.create(domain=domain, slug='/c/en/bat/n/bat', enabled=True)
+        rat = models.Target.objects.create(domain=domain, slug='/c/en/rat/n/rat', enabled=True)
         
         session = domain.get_session(user='123')
         
@@ -121,15 +124,19 @@ class Tests(TestCase):
         answers = session.answers.all()
         self.assertEqual(answers.count(), 2)
         
-        q = session.get_next_question()
+        q = session.get_next_question(
+            #verbose=1,#uncomment to debug
+        )
         
         q = domain.targets.all()
         for target in q.iterator():
             self.assertTrue(target.sense)
+            self.assertTrue(target.enabled)
         
         q = domain.questions.all()
         for question in q.iterator():
             self.assertTrue(question.sense)
+            self.assertTrue(question.enabled)
         
     def test_learn_manual_sql(self):
         settings.ASKLET_RANKER = c.SQL
@@ -139,17 +146,19 @@ class Tests(TestCase):
         q1 = models.Question.objects.create(domain=domain, slug='has_fur', enabled=1)
         q2 = models.Question.objects.create(domain=domain, slug='has_wings', enabled=1)
         q3 = models.Question.objects.create(domain=domain, slug='barks', enabled=1)
+        models.Question.objects.all().update(sense=F('slug'))
         
         bat = models.Target.objects.create(domain=domain, slug='bat', enabled=1)
         rat = models.Target.objects.create(domain=domain, slug='rat', enabled=1)
         bird = models.Target.objects.create(domain=domain, slug='bird', enabled=1)
+        models.Target.objects.all().update(sense=F('slug'))
         
         mu = utils.MatrixUser('asklet/tests/fixtures/matrix.yaml')
         mu.target = 'bird'
         #print(mu.target)
         
         session = domain.get_session(mu)
-        q = session.get_next_question()
+        q = session.get_next_question(verbose=0)
         self.assertTrue(q)
 #        print(q)
         
@@ -260,6 +269,7 @@ class Tests(TestCase):
         pickle.dump(m_dok, open('/tmp/asklet-matrix-dok.pkl','wb'))
     
     def test_ranking(self):
+        
         weights = [
             #(them,us)
             (1,1),
@@ -284,7 +294,8 @@ class Tests(TestCase):
         for them, us in weights:
             agg1 = models.calculate_target_rank_item1(local_weight=them, answer_weight=us)
             agg2 = models.calculate_target_rank_item2(local_weight=them, answer_weight=us)
-            #print(them, us, agg1, agg2)
+            agg3 = models.calculate_target_rank_item3(them, us)
+            print(them, us, agg1, agg2, agg3)
             self.assertEqual(agg1, agg2)
             
     def test_domainuser(self):

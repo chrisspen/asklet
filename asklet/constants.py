@@ -33,7 +33,7 @@ BACKENDS = (
 PYTHON = 'python'
 RANKERS = (
     SQL,
-    PYTHON,
+    #PYTHON,#DEPRECATED
 )
 
 CLOSED = 'closed'

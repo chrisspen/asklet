@@ -16,6 +16,7 @@ LEFT OUTER JOIN asklet_target AS t ON
         t.conceptnet_subject = q.conceptnet_object
     AND t.domain_id = q.domain_id
 WHERE   t.id IS NULL
+    AND q.enabled = CAST(1 AS bool)
     AND q.conceptnet_object IS NOT NULL
     AND (d.language IS NULL
         OR (q.language IS NOT NULL AND d.language = q.language))
