@@ -66,7 +66,7 @@ def calculate_target_rank_item2(local_weight, answer_weight):
     return sign*abs(them+us)/2.
 
 def calculate_target_rank_item3(local_weight, answer_weight):
-    return 4 - abs(local_weight - answer_weight)
+    return c.YES - abs(local_weight - answer_weight)
 
 class Domain(models.Model):
     """
@@ -369,7 +369,8 @@ class Domain(models.Model):
                     local_weight.disambiguation_success = True
                     local_weight.save()
                 else:
-                    #TODO:mark local_weight as inference attempted and failed so we won't retry?
+                    #TODO:mark local_weight as inference attempted and failed
+                    #so we won't retry?
                     local_weight.disambiguation_success = False
                     local_weight.save()
                     
@@ -408,7 +409,8 @@ class Domain(models.Model):
     
     def accuracy_history(self, chunk=10):
         try:
-            sessions = self.sessions.filter(winner__isnull=False).order_by('id')
+            sessions = self.sessions.filter(winner__isnull=False)
+            sessions = sessions.order_by('id')
             history = []
             correct = total = i = 0
             for session in sessions.iterator():
@@ -439,7 +441,9 @@ class Domain(models.Model):
     
     @property
     def connectivity(self):
-        max_weight_count = self.targets.all().count() * self.questions.all().count()
+        target_count = self.targets.all().count()
+        question_count = self.questions.all().count()
+        max_weight_count = target_count * question_count
         actual_weight_count = self.weights.all().count()
         if not max_weight_count:
             return
@@ -464,374 +468,17 @@ class Domain(models.Model):
     
     def get_weight(self, target, question, normalized=False):
         if isinstance(question, Question):
-            weights = TargetQuestionWeight.objects.filter(target=target, question=question)
+            weights = TargetQuestionWeight.objects.filter(
+                target=target, question=question)
         elif isinstance(question, basestring):
-            weights = TargetQuestionWeight.objects.filter(target=target, question__slug=question)
+            weights = TargetQuestionWeight.objects.filter(
+                target=target, question__slug=question)
         if weights.exists():
             if normalized:
                 return weights[0].normalized_weight
             else:
                 return weights[0].weight
         return self.assumption_weight
-    
-    def rank_targets(self, *args, **kwargs):
-        """
-        Returns a list of targets ordered from most likely being the
-        user's choice.
-        
-        Calls the appropriate backend ranker to do the actual calculation.
-        Based on domain size, choice of backend can drastically effect
-        performance.
-        """
-        ranker = settings.ASKLET_RANKER.lower()
-        return getattr(self, 'rank_targets_%s' % ranker)(*args, **kwargs)
-    
-    def _query_targetrankings(self,
-        session_id,
-        question_ids=[],
-        exclude_target_ids=[],
-        only_target_ids=[],
-        verbose=0,
-        limit=1000,
-        order_by=True,
-        as_sql=False):
-        
-        question_ids_str = ''
-        if question_ids:
-            question_ids_str = 'AND a.question_id IN (' + (','.join(map(str, question_ids))) + ')'
-            
-        exclude_target_ids_str = ''
-        if exclude_target_ids:
-            exclude_target_ids_str = 'AND t.id NOT IN (' + (','.join(map(str, exclude_target_ids))) + ')'
-            
-        only_target_ids_str = ''
-        if only_target_ids and len(only_target_ids) <= 1000:
-            only_target_ids_str = 'AND t.id IN (' + (','.join(map(str, only_target_ids))) + ')'
-        
-        #TODO:apply world-assumption to SUM(), if weight missing, insert *WA_WEIGHT
-        # Note, see calculate_target_rank_item3() for the explanation of the rank formula.
-        #sqlite/postgresql/mysql=coalesce
-        sql = """
-SELECT  a.session_id,
-        t.id AS target_id,
-        SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) AS rank
-FROM    asklet_target AS t
-INNER JOIN asklet_answer AS a on
-        a.session_id = {session_id}
-    AND a.guess_id IS NULL
-    {question_ids_str}
-INNER JOIN asklet_question AS q on
-        q.id = a.question_id
-LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
-        tqw.question_id = a.question_id
-    AND tqw.target_id = t.id
-WHERE   t.domain_id = {domain_id}
-    AND t.enabled = CAST(1 AS bool)
-    AND t.sense IS NOT NULL
-    {exclude_target_ids_str}
-    {only_target_ids_str}
-GROUP BY a.session_id, t.id
-{order_by_str}
-{limit_str}
-        """.format(
-            session_id=session_id,
-            domain_id=self.id,
-            assumption_weight=self.assumption_weight,
-            question_ids_str=question_ids_str,
-            exclude_target_ids_str=exclude_target_ids_str,
-            only_target_ids_str='',#only_target_ids_str,#TODO:re-enable?
-            order_by_str='ORDER BY rank DESC' if order_by else '',
-            limit_str=('LIMIT %i' % limit) if limit else '',
-        )
-        if verbose: print('target sql:\n',sql)
-        if as_sql:
-            return sql
-        cursor = connection.cursor()
-        cursor.execute(sql)
-        return cursor
-    
-    def rank_targets_sql(self, session, answers, prior_failed_target_ids=[], prior_top_target_ids=[], target_rankings=None, verbose=False):
-        target_rankings = target_rankings or defaultdict(int) # {target:rank}
-        assert isinstance(target_rankings, dict)
-        
-        targets = self.targets.all().only('id')
-        
-        # Exclude the targets the user has explicitly said NO to.
-        if prior_failed_target_ids:
-            targets = targets.exclude(id__in=prior_failed_target_ids)
-            
-        # Start with the top targets if we know them.
-        if prior_top_target_ids:
-            targets = targets.filter(id__in=prior_top_target_ids)
-        
-        #TODO:cache target rankings and only update when a new answer is provided
-#        for target in targets.iterator():
-#            if target not in target_rankings:
-#                target_rankings[target] = 0
-#            if verbose: print('target:',target.slug)
-#            for question_slug, answer_weight in answers.items():
-#                if not question_slug:
-#                    continue
-#                local_weight = self.get_weight(target, question_slug, normalized=True)
-#                if verbose: print('\tanswer weight:', question_slug, answer_weight, local_weight)
-#                agreement = (local_weight < 0 and answer_weight < 0) or (local_weight > 0 and answer_weight > 0)
-#                #TODO:is this correct? section 0048 is ambiguous
-#                diff = abs((answer_weight + local_weight)/2.)
-#                if agreement:
-#                    target_rankings[target] += diff
-#                else:
-#                    target_rankings[target] -= diff
-#            if verbose: print('\tfinal weight:',target_rankings[target])
-        total = 100#00
-        cursor = self._query_targetrankings(
-            session_id=session.id,
-            question_ids=Question.objects.filter(domain=session.domain, slug__in=answers.keys()).values_list('id', flat=True),
-            exclude_target_ids=prior_failed_target_ids,
-            only_target_ids=prior_top_target_ids,
-            verbose=verbose,
-            limit=total
-        )
-        #TODO:optimize? this loop can be very slow
-        i = 0
-        for session_id, target_id, rank in cursor:
-            i += 1
-            if verbose and (i == 1 or not i % 100 or i == total):
-                sys.stdout.write('\rProcessing %i of %i %.02f%%.' % (i, total, i/float(total)*100))
-                sys.stdout.flush()
-#            print(session_id, target_id, rank)
-#            if target_id is None:
-#                continue
-            target = Target.objects.only('id').get(id=target_id)
-            if target not in target_rankings:
-                target_rankings[target] = 0
-            target_rankings[target] += rank
-        
-        # If there are no weights or answers, the query won't return anything,
-        # so return default ranks of 0 for everything.
-#        if not target_rankings:
-#            target_rankings = dict((t, 0.0)for t in targets.iterator())
-        
-        if verbose: print('%i targets' % len(target_rankings))
-        
-        # Higher rank means more likely to be the target the user is thinking.
-        top_targets = sorted(target_rankings.items(), key=lambda o:o[1], reverse=True)
-        
-        return top_targets
-    
-    #TODO:deprecated, remote
-    def rank_targets_python(self, session, answers, prior_failed_target_ids=[], prior_top_target_ids=[], target_rankings=None, verbose=False):
-        """
-        Returns a list of targets ordered from most likely to least likely
-        to be the user's choice.
-        
-        answers := {question_slug: answer_int}
-        prior_failed_target_ids := [target_ids that should be ignored]
-        prior_top_target_ids := [target_ids to start with]
-        
-        Note, this implementation is a hypothetical interpreation of Burgener's
-        algorithm, as sections 0048 and 0049, which claim to describe the
-        target ranking, omit any explanation of how the final aggregation is
-        to occur. Empirical tests taking a sum of the user's answer weight plus
-        the pre-adjusted weight result in no learning.
-        What follows is an educated guess of how to accomplish the result,
-        even though the method below is not actually described in the patent
-        filing.
-        """
-        #print('target_rankings:',target_rankings)
-        assert isinstance(target_rankings, dict)
-        target_rankings = target_rankings or defaultdict(int) # {target:rank}
-        targets = self.targets.all()
-        
-        # Exclude the targets the user has explicitly said NO to.
-        #print('prior_failed_target_ids:',prior_failed_target_ids)
-        if prior_failed_target_ids:
-            targets = targets.exclude(id__in=prior_failed_target_ids)
-            
-        # Start with the top targets if we know them.
-        if prior_top_target_ids:
-            targets = targets.filter(id__in=prior_top_target_ids)
-#        print('possible targets:',targets)
-#        print('target_rankings:',target_rankings)
-        
-        #TODO:cache target rankings and only update when a new answer is provided
-        for target in targets.iterator():
-            if target not in target_rankings:
-                target_rankings[target] = 0
-            if verbose: print('target:',target.slug)
-            for question_slug, answer_weight in answers.items():
-                if not question_slug:
-                    continue
-                local_weight = self.get_weight(target, question_slug, normalized=True)
-                if verbose: print('\tanswer weight:', question_slug, answer_weight, local_weight)
-
-                #target_rankings[target] += calculate_target_rank_item1(
-                #target_rankings[target] += calculate_target_rank_item2(
-                target_rankings[target] += calculate_target_rank_item3(
-                    local_weight=local_weight,
-                    answer_weight=answer_weight)
-                
-            if verbose: print('\tfinal weight:',target_rankings[target])
-            
-        if verbose: print('%i targets' % len(target_rankings))
-        
-        # Higher rank means more likely to be the target the user is thinking.
-        top_targets = sorted(target_rankings.items(), key=lambda o:o[1], reverse=True)
-#        print('top_targets:',top_targets)
-        
-        return top_targets
-    
-    def rank_questions(self, *args, **kwargs):
-        ranker = settings.ASKLET_RANKER.lower()
-        return getattr(self, 'rank_questions_%s' % ranker)(*args, **kwargs)
-    
-    def _query_questionrankings(self, session_id, only_target_ids=[], exclude_question_ids=[], verbose=0):
-        """
-        Uses SQL to finds the next best question given current answers.
-        """
-        
-        usable_targets = self.usable_targets.only('id')
-        
-        session = Session.objects.get(id=session_id)
-        ranking_str = ''
-        #TODO:fix? actually slows down the query?
-#        if session.rankings.all().exists():
-#            # Restrict question analysis to those linked to actively ranked targets.
-#            ranking_str = 'AND r.id IS NOT NULL'
-#            usable_targets = usable_targets.filter(rankings__session__id=session_id)
-        
-        total_target_count = usable_targets.count()
-        
-        only_target_ids_str = ''
-        if only_target_ids and len(only_target_ids) <= 1000:
-            only_target_ids_str = 'AND tqw.target_id IN (' + (','.join(map(str, only_target_ids))) + ')'
-        
-        exclude_question_ids_str = ''
-        if exclude_question_ids:
-            exclude_question_ids_str = 'AND q.id NOT IN (' + (','.join(map(str, exclude_question_ids))) + ')'
-        
-#        print('%i enabled questions' % self.questions.filter(enabled=True).count())
-#        print('%i question weights' % TargetQuestionWeight.objects.filter(question__domain=self).count())
-        
-        
-        # We add the tangible weight sum to the implied sum of missing weights.
-        # e.g. If we have 1000 targets but only 100 have weights for
-        # a question, then 900 have an implicit weight as defined by
-        # the domain's world assumption.
-        cursor = connection.cursor()
-        sql = """
-SELECT  m.question_id,
-        ABS(m.weight_sum + (({total_target_count} - m.target_count)*{missing_weight})) AS weight_sum_abs,
-        m.weight_sum,
-        m.target_count
-FROM (
-    -- Aggregate question_id -> sum(nweight)
-    SELECT  q.id AS question_id,
-            SUM(COALESCE(a.answer, tqw.nweight)) AS weight_sum,
-            COUNT(DISTINCT tqw.target_id) AS target_count
-    FROM    asklet_question AS q
-    LEFT OUTER JOIN
-            asklet_targetquestionweight AS tqw ON
-            tqw.question_id = q.id
-        AND tqw.weight IS NOT NULL
-    LEFT OUTER JOIN
-            asklet_answer AS a ON
-            a.session_id = {session_id}
-        AND a.question_id = tqw.question_id
-    LEFT OUTER JOIN
-            asklet_ranking AS r ON
-            r.session_id = {session_id}
-        AND r.target_id = tqw.target_id
-    WHERE   q.enabled = CAST(1 AS bool)
-        AND q.sense IS NOT NULL
-        AND q.domain_id = {domain_id}
-        {only_target_ids_str}
-        {exclude_question_ids_str}
-        {ranking_str}
-    GROUP BY q.id
-) AS m
-WHERE m.weight_sum IS NOT NULL
-ORDER BY weight_sum_abs ASC
-LIMIT 1;
-        """.format(
-            domain_id=self.id,
-            session_id=session_id,
-            total_target_count=total_target_count,
-            missing_weight=self.assumption_weight,
-            only_target_ids_str='',#only_target_ids_str,#TODO:re-enable?
-            exclude_question_ids_str=exclude_question_ids_str,
-            ranking_str=ranking_str,
-#            sub_sql=sub_sql,
-        )
-        if verbose: print('question sql:',sql)
-        cursor.execute(sql)
-        results = []
-        for question_id, weight_sum_abs, weight_sum, target_count in cursor:
-#            print('row:',question_id, weight_sum_abs, weight_sum, target_count, total_count)
-            results.append((question_id, weight_sum_abs))
-        return results
-    
-    def rank_questions_sql(self, session, targets=[], previous_question_ids=[], verbose=True):
-        results = self._query_questionrankings(
-            session_id=session.id,
-            only_target_ids=[_ if isinstance(_, int) else _.id for _ in targets],
-            exclude_question_ids=previous_question_ids,
-            verbose=verbose)
-        question_rankings = defaultdict(int) # {question:rank}
-#        print('results:',results)
-        for question_id, rank in results:
-            question = Question.objects.get(id=question_id)
-            question_rankings[question] = rank
-
-        #TODO:rank questions by finding the one with the most even YES/NO split, explained in 0053
-        # Lower rank means better splitting criteria.
-        question_rankings = sorted(question_rankings.items(), key=lambda o: abs(o[1]))
-        return question_rankings
-    
-    #TODO:deprecated, remove
-#    def rank_questions_python(self, session, targets, previous_question_ids=[], verbose=True):
-#        """
-#        Ranks questions from most helpful to least helpful.
-#        """
-#        
-#        if verbose: print('questions0:',self.questions.all().count())
-#        questions = Question.objects.askable(self.questions.all())
-#        if verbose: print('askable0:',questions.count())
-#        if previous_question_ids:
-#            if verbose: print('previous_question_ids:',previous_question_ids)
-#            questions = questions.exclude(id__in=previous_question_ids)
-#        if verbose: print('askable1:',questions.count())
-#    
-#        if verbose:
-#            print('%i askable questions out of %i total questions and %i questions asked' \
-#                % (
-#                   questions.count(),
-#                   self.questions.all().count(),
-#                   len(previous_question_ids),
-#                ))
-#        splittable_questions = questions
-#        if targets:
-#            splittable_questions = questions.filter(
-#                weights__id__isnull=False,
-#                weights__target__in=targets).distinct()
-#        question_rankings = defaultdict(int) # {question:rank}
-#        #TODO:support closed-world assumption by counting targets without explicit weight and assuming weight=-4?
-#        for question in splittable_questions.iterator():
-#            for weight in question.weights.all().iterator():
-#                
-#                #TODO:use raw weight?
-#                question_rankings[question] += 1 if weight.weight > 0 else -1
-#                
-##                question_rankings[question] += weight.weight or 0
-#                
-##                if not weight.count:
-##                    continue
-##                question_rankings[question] += weight.weight/float(weight.count)
-#
-#        if verbose: print('%i splittable questions' % splittable_questions.count())
-#        #TODO:rank questions by finding the one with the most even YES/NO split, explained in 0053
-#        # Lower rank means better splitting criteria.
-#        question_rankings = sorted(question_rankings.items(), key=lambda o: abs(o[1]))
-#        return question_rankings
     
 class Session(models.Model):
     """
@@ -880,16 +527,29 @@ class Session(models.Model):
     
     created = models.DateTimeField(auto_now_add=True)
     
-#    target_rankings = PickledObjectField(
-#        blank=True,
-#        null=True,
-#        compress=True,
-#        help_text=_('Cached dictionary of {target_id:ranking}.'))
-    
     def question_count(self):
         return self.answers.all().count()
     question_count.short_description = 'questions'
     
+    @property
+    def incorrect_targets(self):
+        """
+        Returns a queryset of targets that were guessed but were incorrect.
+        """
+        return Target.objects.filter(
+            id__in=self.answers.filter(
+                guess__isnull=False
+            ).values_list('guess_id', flat=True))
+    
+    @property
+    def previously_asked_questions(self):
+        return self.answers.filter(question__isnull=False)
+        
+    @property
+    def previously_asked_question_ids(self):
+        return self.previously_asked_questions\
+            .values_list('question_id', flat=True)
+        
     @property
     def unguessed_targets(self):
         guessed_targets = self.answers\
@@ -915,50 +575,21 @@ class Session(models.Model):
             question=question,
             answer=answer)
     
-#    def get_top_targets_cache(self):
-#        #TODO:save to filesystem cache keyed by session id
-#        prior_top_target_ids = []
-#        if hasattr(self, '_cached_prior_top_target_ids'):
-#            prior_top_target_ids = self._cached_prior_top_target_ids
-#        return prior_top_target_ids
-        
-#    def clear_top_targets_cache(self):
-#        #TODO:save to filesystem cache keyed by session id
-#        self._cached_prior_top_target_ids = []
-#    
-#    def save_top_targets_cache(self, lst):
-#        #TODO:save to filesystem cache keyed by session id
-#        self._cached_prior_top_target_ids = lst
-#    
-#    def get_target_rankings_cache(self):
-#        if hasattr(self, '_cached_target_rankings'):
-#            d = self._cached_target_rankings
-#            if not isinstance(d, dict):
-#                d = dict(d)
-#            return d
-#        return defaultdict(int)
-#    
-#    def save_target_rankings_cache(self, tr):
-#        if not isinstance(tr, dict):
-#            d = defaultdict(int)
-#            d.update(tr)
-#        self._cached_target_rankings = tr
-#    
-#    def get_prior_question_ids_cache(self):
-#        if hasattr(self, '_cached_prior_question_ids'):
-#            return self._cached_prior_question_ids
-#        return []
-#    
-#    #TODO:deprecated, remove
-#    def save_prior_question_ids_cache(self, lst):
-#        self._cached_prior_question_ids = lst
-    
     @atomic
     def update_target_rankings(self, verbose=0):
         """
         Recalculates the target ranking records given the currently
         answered questions.
         """
+        
+        drop_threshold = -4#works!
+        #drop_threshold = 0
+        
+        #=>1.0 old rank fixed
+        #=>0.0 new rank overrides everything
+        #=>0.5 old rank cut in half
+        ranking_weight = 0.1
+        ranking_weight_inv = 1-ranking_weight
         
         # Delete rankings of failed target guesses?
         incorrect_targets = self.incorrect_targets
@@ -983,7 +614,7 @@ class Session(models.Model):
 INSERT INTO asklet_ranking (session_id, target_id, ranking)
 SELECT  a.session_id,
         t.id,
-        SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight})))
+        SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) AS ranking
 FROM    asklet_target AS t
 INNER JOIN asklet_answer AS a on
         a.session_id = {session_id}
@@ -998,13 +629,15 @@ WHERE   t.domain_id = {domain_id}
     AND t.enabled = CAST(1 AS bool)
     AND t.sense IS NOT NULL
     AND t.id NOT IN ({exclude_target_ids})
-GROUP BY a.session_id, t.id;
+GROUP BY a.session_id, t.id
+HAVING SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) > {drop_threshold};
                 """.format(
                     session_id=self.id,
                     domain_id=self.domain.id,
                     question_id=unranked_answer.question.id,
                     assumption_weight=self.domain.assumption_weight,
                     exclude_target_ids=exclude_target_id_str,
+                    drop_threshold=drop_threshold,
                 )
             else:
                 # For subsequent iterations, update the existing records.
@@ -1026,25 +659,23 @@ LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
 WHERE   t.domain_id = {domain_id}
     AND t.enabled = CAST(1 AS bool)
     AND t.sense IS NOT NULL
-    AND t.id NOT IN ({exclude_target_ids})
 GROUP BY a.session_id, t.id
                     """.format(
                         session_id=self.id,
                         domain_id=self.domain.id,
                         question_id=unranked_answer.question.id,
                         assumption_weight=self.domain.assumption_weight,
-                        exclude_target_ids=exclude_target_id_str,
                     )
                     manually_update = True
                 else:
                     sql = """
 UPDATE asklet_ranking AS r
-SET ranking += s.ranking
+SET ranking = r.ranking*{ranking_weight} + s.ranking*{ranking_weight_inv}
 FROM (
     SELECT  a.session_id,
-            t.id AS target_id,
+            t.target_id,
             SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) AS ranking
-    FROM    asklet_target AS t
+    FROM    asklet_ranking AS t
     INNER JOIN asklet_answer AS a on
             a.session_id = {session_id}
         AND a.guess_id IS NULL
@@ -1053,12 +684,8 @@ FROM (
             q.id = a.question_id
     LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
             tqw.question_id = a.question_id
-        AND tqw.target_id = t.id
-    WHERE   t.domain_id = {domain_id}
-        AND t.enabled = CAST(1 AS bool)
-        AND t.sense IS NOT NULL
-        AND t.id NOT IN ({exclude_target_ids})
-    GROUP BY a.session_id, t.id
+        AND tqw.target_id = t.target_id
+    GROUP BY a.session_id, t.target_id
 ) AS s
 WHERE   r.target_id = s.target_id
     AND r.session_id = s.session_id;
@@ -1067,7 +694,8 @@ WHERE   r.target_id = s.target_id
                         domain_id=self.domain.id,
                         question_id=unranked_answer.question.id,
                         assumption_weight=self.domain.assumption_weight,
-                        exclude_target_ids=exclude_target_id_str,
+                        ranking_weight=ranking_weight,
+                        ranking_weight_inv=ranking_weight_inv,
                     )
             if verbose:
                 print('~'*80)
@@ -1085,7 +713,8 @@ WHERE   r.target_id = s.target_id
                         target_id=target_id,
                         defaults=dict(ranking=0))
                     old_ranking = r.ranking
-                    r.ranking += ranking
+                    #r.ranking += ranking
+                    r.ranking = r.ranking*ranking_weight + ranking*ranking_weight_inv
                     r.save()
                     if verbose:
                         print('sqlite3.ranking.updated %s: %s->%s' % (r.target, old_ranking, r.ranking))
@@ -1097,23 +726,141 @@ WHERE   r.target_id = s.target_id
             # Delete the lowest N rankings to speed up the eventual
             # question-ranking.
             #TODO:paramaterize count and ratio threshold?
-            rankings_count = self.rankings.all().count()
-            if rankings_count > 10:
-                low_rankings = self.rankings.all().order_by('-ranking')[int(rankings_count*0.75):]
-                Ranking.objects.filter(id__in=low_rankings.values_list('id', flat=True)).delete()
+            # lower, the longer the search takes but more certain
+            # higher, the faster the search but more likely to error
+            if 1:#rankings_count > 3:#10:
+                #rankings_count = self.rankings.all().count()
+                #low_rankings = self.rankings.all().order_by('-ranking')[int(rankings_count*0.75):]
+                #Ranking.objects.filter(id__in=low_rankings.values_list('id', flat=True))
+                low_rankings = self.rankings.filter(ranking__lt=drop_threshold)
+#                low_rankings_count = low_rankings.count()
+#                if low_rankings_count:
+#                    print('deleting %i low rankings' % low_rankings_count)
+                low_rankings.delete()
             
             if verbose:
                 print('final rankings:',self.rankings.all().count())
             
             #commit()#unnecessary with atomic()
     
-    @property
-    def incorrect_targets(self):
+    def _query_questionrankings(self, exclude_question_ids=[], verbose=0):
         """
-        Returns a queryset of targets that were guessed but were incorrect.
+        Uses SQL to finds the next best question given current answers.
         """
-        return Target.objects.filter(id__in=self.answers.filter(guess__isnull=False).values_list('guess_id', flat=True))
+        
+        usable_targets = self.domain.usable_targets.only('id')
+        
+        session = self
+        session_id = self.id
+        ranking_str = ''
+        
+        #TODO:fix? actually slows down the query?
+        if self.rankings.all().exists():
+            # Restrict question analysis to those linked to actively ranked targets.
+            # Note, we only add this condition if there is at least one ranking.
+            # Otherwise, we won't get any questions for the first iteration.
+            #ranking_str = 'AND r.id IS NOT NULL'
+            ranking_str = '''AND tqw.target_id IN (
+    SELECT target_id
+    FROM asklet_ranking
+    WHERE session_id = {session_id}
+)'''.format(session_id=session_id)
+            usable_targets = usable_targets.filter(
+                rankings__session=self)
+
+#    LEFT OUTER JOIN
+#            asklet_ranking AS r ON
+#            r.session_id = {session_id}
+#        AND r.target_id = tqw.target_id
+
+        total_target_count = usable_targets.count()
+        
+        exclude_question_ids_str = ''
+        if exclude_question_ids:
+            exclude_question_ids_str = 'AND q.id NOT IN (' + (','.join(map(str, exclude_question_ids))) + ')'
+        
+#        print('%i enabled questions' % self.questions.filter(enabled=True).count())
+#        print('%i question weights' % TargetQuestionWeight.objects.filter(question__domain=self).count())
+        
+        # We add the tangible weight sum to the implied sum of missing weights.
+        # e.g. If we have 1000 targets but only 100 have weights for
+        # a question, then 900 have an implicit weight as defined by
+        # the domain's world assumption.
+        cursor = connection.cursor()
+        sql = """
+SELECT  m.*
+        --,-((m.up_count/m.target_count)*log(m.up_count/m.target_count) + (m.down_count/m.target_count)*log(m.down_count/m.target_count)) AS entropy
+FROM (
+SELECT  m.question_id,--m.slug,
+        ABS(m.weight_sum + (({total_target_count} - m.target_count)*{missing_weight})) AS weight_sum_abs,
+        --m.up_count,
+        --m.down_count + case when {missing_weight} < 0 then {total_target_count}-m.up_count else 0 end AS down_count,
+        m.weight_sum,
+        m.target_count
+FROM (
+    -- Aggregate question_id -> sum(nweight)
+    SELECT  q.id AS question_id,q.slug,
+            SUM(COALESCE(a.answer, tqw.nweight)) AS weight_sum,
+            SUM(CASE WHEN COALESCE(a.answer, tqw.nweight, -4) > 0  THEN 1 ELSE 0 END) AS up_count,
+            SUM(CASE WHEN COALESCE(a.answer, tqw.nweight, -4) <= 0 THEN 1 ELSE 0 END) AS down_count,
+            COUNT(DISTINCT tqw.target_id) AS target_count
+    FROM    asklet_question AS q
+    LEFT OUTER JOIN
+            asklet_targetquestionweight AS tqw ON
+            tqw.question_id = q.id
+        AND tqw.weight IS NOT NULL
+    LEFT OUTER JOIN
+            asklet_answer AS a ON
+            a.session_id = {session_id}
+        AND a.question_id = tqw.question_id
+    WHERE   q.enabled = CAST(1 AS bool)
+        AND q.sense IS NOT NULL
+        AND q.domain_id = {domain_id}
+        {exclude_question_ids_str}
+        {ranking_str}
+    GROUP BY q.id
+) AS m
+) AS m
+WHERE m.weight_sum IS NOT NULL
+ORDER BY weight_sum_abs ASC
+--ORDER BY entropy DESC
+LIMIT 1;
+        """.format(
+            domain_id=self.domain.id,
+            session_id=session_id,
+            total_target_count=total_target_count,
+            missing_weight=self.domain.assumption_weight,
+            exclude_question_ids_str=exclude_question_ids_str,
+            ranking_str=ranking_str,
+#            sub_sql=sub_sql,
+        )
+        if verbose: print('question sql:',sql)
+        cursor.execute(sql)
+        results = []
+        for question_id, weight_sum_abs, weight_sum, target_count in cursor:
+#            print('row:',question_id, weight_sum_abs, weight_sum, target_count, total_count)
+            results.append((question_id, weight_sum_abs))
+        return results
     
+    def rank_questions_sql(self, verbose=True):
+        results = self._query_questionrankings(
+            exclude_question_ids=self.previously_asked_question_ids,
+            verbose=verbose)
+        question_rankings = defaultdict(int) # {question:rank}
+#        print('results:',results)
+        for question_id, rank in results:
+            question = Question.objects.get(id=question_id)
+            question_rankings[question] = rank
+
+        #TODO:rank questions by finding the one with the most even YES/NO split, explained in 0053
+        # Lower rank means better splitting criteria.
+        question_rankings = sorted(question_rankings.items(), key=lambda o: abs(o[1]))
+        return question_rankings
+
+    def rank_questions(self, *args, **kwargs):
+        ranker = settings.ASKLET_RANKER.lower()
+        return getattr(self, 'rank_questions_%s' % ranker)(*args, **kwargs)
+
     def get_next_question(self, verbose=0):
         """
         Returns the next best question to ask.
@@ -1209,12 +956,9 @@ WHERE   r.target_id = s.target_id
 #            self.save_top_targets_cache(list(target.id for target,rank in top_targets))
         
         # Second mode.
-        previous_question_ids = self.answers.filter(question__isnull=False).values_list('question_id', flat=True)
         #print('previous_question_ids:',previous_question_ids)
-        question_rankings = self.domain.rank_questions(
-            session=self,
-            #targets=[_1 for _1,_2 in top_targets],
-            previous_question_ids=previous_question_ids,
+        previous_question_ids = self.previously_asked_question_ids
+        question_rankings = self.rank_questions(
             verbose=verbose)
         if verbose: print('%i question rankings' % len(question_rankings))
         if question_rankings:

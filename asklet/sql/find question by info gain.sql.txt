@@ -1,0 +1,56 @@
+﻿/*
+select -((1/2.)*log(1/2., 2) + (1/2.)*log(1/2., 2))
+
+select -((1/2.)*log(1/2.) + (1/2.)*log(1/2.))
+
+select -((16111/39552.)*log(16111/39552., 2) + (23441/39552.)*log(23441/39552., 2))
+
+select -((16111/39552.)*log(16111/39552.) + (23441/39552.)*log(23441/39552.))
+*/
+SELECT
+	m.*
+	,-((m.up_count/m.target_count)*log(m.up_count/m.target_count) + (m.down_count/m.target_count)*log(m.down_count/m.target_count)) as entropy
+FROM (
+SELECT  m.question_id,m.slug,
+        --ABS(m.weight_sum + ((39552 - m.target_count)*-4)) AS weight_sum_abs,
+        ABS(m.weight_sum + ((39552 - m.target_count)*-4))/m.target_count AS weight_sum_abs,
+        --m.weight_sum,
+        m.up_count,
+        m.down_count + case when -4 < 0 then 39552-m.up_count else 0 end as down_count,
+        m.target_count::numeric
+FROM (
+
+    -- Aggregate question_id -> sum(nweight)
+    SELECT  q.id AS question_id,q.slug,
+	    SUM(COALESCE(a.answer, tqw.nweight, -4)) AS weight_sum,
+            SUM(CASE WHEN COALESCE(a.answer, tqw.nweight, -4) > 0  THEN 1 ELSE 0 END) AS up_count,
+            SUM(CASE WHEN COALESCE(a.answer, tqw.nweight, -4) <= 0 THEN 1 ELSE 0 END) AS down_count,
+            --COUNT(*)::numeric AS target_count
+            39552 as target_count
+    FROM    asklet_question AS q
+    LEFT OUTER JOIN
+            asklet_targetquestionweight AS tqw ON
+            tqw.question_id = q.id
+    LEFT OUTER JOIN
+            asklet_answer AS a ON
+            a.session_id = 16
+        AND a.question_id = tqw.question_id
+    WHERE   q.enabled = CAST(1 AS bool)
+        AND q.sense IS NOT NULL
+        AND q.domain_id = 1
+        --and q.id = 1277606
+        AND q.id NOT IN (1517240,1279830,1293743,1282393)
+        AND tqw.target_id IN (
+	    SELECT target_id
+	    FROM asklet_ranking
+	    WHERE session_id = 16
+	)
+    GROUP BY q.id
+
+) AS m
+) AS m
+WHERE m.target_count IS NOT NULL
+AND m.up_count > 0 and m.down_count > 0
+--ORDER BY entropy DESC
+ORDER BY weight_sum_abs DESC
+--LIMIT 10;

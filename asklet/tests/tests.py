@@ -406,4 +406,64 @@ class Tests(TestCase):
         domain.infer(continuous=False, iter_commit=False)
         q = models.TargetQuestionWeight.objects.filter(target__domain=domain)
         self.assertEqual(q.count(), 3)
+    
+    def _test_learn_animals(self):
+        """
+        Confirms the system can learn a toy knowledgebase from scratch.
+        Should obtain 100% accuracy within the first 100 sessions.
+        """
+        settings.ASKLET_RANKER = c.SQL
         
+        matrix_fn = 'asklet/tests/fixtures/animals.yaml'
+        max_sessions = 150
+        
+        domains = models.Domain.objects.all()
+        self.assertEqual(domains.count(), 1)
+        
+        # Set domain to use CWA.
+        domain_name = 'test'
+        domain = models.Domain.objects.get(slug=domain_name)
+        domain.assumption = c.CLOSED
+        domain.save()
+        
+        # Simulate domain using the CWA.
+        random.seed(0)
+        call_command(
+            'asklet_simulate',
+            max_sessions=max_sessions,
+            domain=domain_name,
+            matrix=matrix_fn,
+            verbose=0,#enable for debugging messages
+            seed=0)
+        domain = models.Domain.objects.get(slug=domain_name)
+        history = domain.accuracy_history()
+        print('closed-world-assumption history:',history)
+        self.assertEqual(history[-1], 1.0)
+        
+        # Reset domain.
+#        domain.purge(verbose=1)
+#        self.assertEqual(domain.sessions.all().count(), 0)
+#        self.assertEqual(domain.targets.all().count(), 0)
+#        self.assertEqual(domain.questions.all().count(), 0)
+#        self.assertEqual(domain.weights.count(), 0)
+#        
+#        # Change domain to use OWA.
+#        models.Domain.objects.update()
+#        domain = models.Domain.objects.get(slug=domain_name)
+#        domain.assumption = c.OPEN
+#        domain.save()
+#        
+#        # Simulate domain using the OWA.
+#        random.seed(0)
+#        call_command(
+#            'asklet_simulate',
+#            max_sessions=max_sessions,
+#            domain=domain_name,
+#            matrix=matrix_fn,
+#            verbose=0,#enable for debugging messages
+#            seed=0)
+#        domain = models.Domain.objects.get(slug=domain_name)
+#        history = domain.accuracy_history()
+#        print('open-world-assumption history:',history)
+#        self.assertEqual(history[-1], 1.0)
+#        
