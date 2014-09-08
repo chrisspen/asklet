@@ -1234,6 +1234,16 @@ class Target(models.Model):
             target from the subject with an un-ambiguous question.'''),
     )
     
+    total_senses = models.PositiveIntegerField(
+        blank=True,
+        null=True,
+        db_index=True,
+        editable=False,
+        verbose_name=_('total senses'),
+        help_text=_('''If ambiguous, cached count of the total umambiguous
+            versions.'''),
+    )
+    
 #    stats_last_updated = models.DateTimeField(
 #        blank=True,
 #        null=True,
@@ -1308,6 +1318,15 @@ class Target(models.Model):
         
         if self.total_weights_aq is None:
             self.total_weights_aq  = self.weights.filter(question__sense__isnull=True).count()
+        
+        if not self.sense and self.total_senses is None:
+            q = Target.objects.filter(
+                language=self.language,
+                word=self.word,
+                sense__isnull=False)
+            if self.pos:
+                q = q.filter(pos=self.pos)
+            self.total_senses = q.count()
         
         super(Target, self).save(*args, **kwargs)
 

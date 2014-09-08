@@ -28,7 +28,7 @@ class Command(BaseCommand):
     option_list = BaseCommand.option_list + (
         make_option('--domain', default=''),
         make_option('--dryrun', action='store_true', default=False),
-        )
+    )
     
     @commit_on_success
     def handle(self, *args, **options):
@@ -69,6 +69,7 @@ class Command(BaseCommand):
                     Q(slug_parts__isnull=True)|\
                     Q(language__isnull=True)|\
                     Q(word__isnull=True)|\
+                    Q(sense__isnull=True, total_senses__isnull=True)|\
                     Q(total_weights__isnull=True)|\
                     Q(pos__isnull=True, slug_parts__gt=3)|\
                     Q(sense__isnull=True, slug_parts__gt=4))

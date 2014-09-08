@@ -1,0 +1,22 @@
+﻿/*
+--how many with existing unambiguous sense?
+select 
+count(*)
+from asklet_target as ta
+where ta.sense is null
+and ta.total_weights_uaq >= 1
+and ta.total_weights_aq >= 1
+--limit 1000
+*/
+
+--how many ambiguous targets have ambiguous edges and no unambiguous edges?
+select 
+--count(*)
+*
+from asklet_target as ta
+where ta.sense is null
+and ta.total_weights_uaq = 0
+and ta.total_weights_aq >= 1
+limit 1000
+
+--select * from asklet_target where word='beetle-browed'
