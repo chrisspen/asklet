@@ -9,6 +9,7 @@ and ta.total_weights_aq >= 1
 --limit 1000
 */
 
+/*
 --how many ambiguous targets have ambiguous edges and no unambiguous edges?
 select 
 --count(*)
@@ -18,5 +19,23 @@ where ta.sense is null
 and ta.total_weights_uaq = 0
 and ta.total_weights_aq >= 1
 limit 1000
+*/
 
---select * from asklet_target where word='beetle-browed'
+--select * from asklet_target where word like '%reddit%'
+
+
+--how many ambiguous targets with no unambiguous targets have dbpedia gloss?
+select 
+--count(distinct ta.id)
+distinct ta.*
+from asklet_target as ta
+inner join asklet_targetquestionweight as tqw on tqw.target_id=ta.id
+inner join asklet_question as q on q.id = tqw.question_id
+	and q.conceptnet_predicate='<http://dbpedia.org/ontology/abstract>'
+	and q.text is not null
+	and q.text != ''
+where ta.sense is null
+and ta.total_weights_uaq = 0
+and ta.total_weights_aq >= 1
+order by ta.total_weights_aq desc
+limit 1000
