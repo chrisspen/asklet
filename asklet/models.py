@@ -92,6 +92,18 @@ class Domain(models.Model):
         help_text=_('''If a target is the top-ranked choice for this many
             iterations, it will be used as a guess.'''))
     
+    use_tree_indexing = models.BooleanField(
+        default=False,
+        help_text=_('''If checked, a decision tree will be used to speed up
+            question selection at the expense of increased disk usage and
+            pre-processing time.'''))
+    
+    max_tree_targets = models.PositiveIntegerField(
+        default=1000,
+        blank=False,
+        null=False,
+        help_text=_('''The maximum number of targets to cache on tree nodes.'''))
+    
     assumption = models.CharField(
         max_length=25,
         blank=False,
@@ -175,6 +187,43 @@ class Domain(models.Model):
         tq, _ = TargetQuestionWeight.objects.get_or_create(
             target=t, question=q)
         return tq
+    
+    @atomic
+    def refresh_tree(self, verbose=False, **kwargs):
+        """
+        Generates or updates the index tree if enabled on the domain.
+        """
+        if not self.use_tree_indexing:
+            return
+        
+        queue = [None] # [parent node]
+        while queue:
+            
+            parent_node = queue.pop(0)
+            current_depth = parent_node.depth if parent_node else 0
+            
+            # Populate top-level nodes.
+            questions = self.questions\
+                .filter(enabled=True)\
+                .exclude(id__in=self.tree_nodes.filter(depth=current_depth)\
+                    .values_list('question'))
+            if parent_node:
+                questions = questions.filter(parent=parent_node)
+            else:
+                questions = questions.filter(parent__isnull=True)
+            for question in questions.iterator():
+                print('Added tree node for question %s at depth %i...' % (question, parent_node.depth))
+                #TODO:how to track best_splitter?
+                for parent_value in (c.YES, c.NO, c.DEPENDS, c.UNKNOWN):
+                    child_node, _ = TreeNode.objects.get_or_create(
+                        domain=self,
+                        depth=current_depth+1,
+                        parent=parent_node,
+                        parent_value=parent_value,
+                        question=question,
+                    )
+                
+            parent_node.refresh()
     
     @atomic
     def infer(self, limit=1000, continuous=True, target=None, verbose=False, iter_commit=True, rules=None):
@@ -479,7 +528,76 @@ class Domain(models.Model):
             else:
                 return weights[0].weight
         return self.assumption_weight
+
+class TreeNode(models.Model):
     
+    domain = models.ForeignKey(
+        Domain,
+        related_name='tree_nodes')
+    
+    parent = models.ForeignKey(
+        'self',
+        blank=True,
+        null=True)
+    
+    parent_answer = models.IntegerField(
+        blank=True,
+        null=True,
+        help_text=_('''The answer given in the parent node to arrive
+            at this node.'''))
+    
+    question = models.ForeignKey(
+        'Question',
+        related_name='tree_nodes')
+    
+    depth = models.IntegerField(
+        default=0,
+        blank=False,
+        db_index=True,
+        null=False)
+    
+    splitting_metric = models.FloatField(
+        blank=False,
+        null=False,
+        help_text=_('''A measure of how well this node splits the dataset.'''))
+    
+    best_splitter = models.NullBooleanField(
+        default=None,
+        blank=True,
+        db_index=True,
+        null=True)
+    
+    targets = models.ManyToManyField(
+        'Target',
+        blank=True,
+        null=True,
+        help_text=_('''Stores the most likely targets.'''))
+    
+    fresh = models.BooleanField(
+        default=False,
+        db_index=True)
+        
+    created = models.DateTimeField(
+        auto_now_add=True,
+        editable=False)
+        
+    updated = models.DateTimeField(
+        auto_now=True,
+        blank=True,
+        null=True,
+        editable=False)
+    
+    class Meta:
+        unique_together = (
+            ('parent', 'parent_answer', 'question'),
+            ('domain', 'depth', 'best_splitter'),
+        )
+        index_together = (
+            ('domain', 'parent', 'best_splitter'),
+            ('domain', 'fresh'),
+            ('domain', 'depth'),
+        )
+
 class Session(models.Model):
     """
     Represents a single game of question and answering
@@ -489,6 +607,12 @@ class Session(models.Model):
     """
     
     domain = models.ForeignKey(Domain, related_name='sessions')
+    
+    node = models.ForeignKey(
+        'RankingNode',
+        related_name='sessions',
+        blank=True,
+        null=True)
     
     user = models.ForeignKey(
         User,
@@ -575,6 +699,25 @@ class Session(models.Model):
             question=question,
             answer=answer)
     
+    def get_or_create_current_node(self):
+        """
+        Retrieves the current RankingNode instance, creating it if it does
+        not yet exist.
+        """
+        questions = self.previously_asked_questions
+        i = 0
+        parent = None
+        node = None
+        for question in questions.iterator():
+            node, _ = RankingNode.objects.get_or_create(
+                domain=self.domain,
+                parent=parent,
+                question=question.question,
+                answer=question.answer,
+            )
+            parent = node
+        return node
+    
     @atomic
     def update_target_rankings(self, verbose=0):
         """
@@ -593,13 +736,16 @@ class Session(models.Model):
         
         # Delete rankings of failed target guesses?
         incorrect_targets = self.incorrect_targets
-        if incorrect_targets:
-            expired_rankings = self.rankings.filter(target__in=incorrect_targets)
-            if verbose:
-                print('%i expired_rankings' % expired_rankings.count())
-            expired_rankings.delete()
+#        if incorrect_targets:
+#            expired_rankings = self.rankings.filter(target__in=incorrect_targets)
+#            if verbose:
+#                print('%i expired_rankings' % expired_rankings.count())
+#            expired_rankings.delete()
         exclude_target_ids = [0] + list(incorrect_targets.values_list('id', flat=True))
         exclude_target_id_str = ','.join(map(str, exclude_target_ids))
+        
+        #parent_node_id = self.node.id if self.node else 'null'
+        current_node = self.node = self.get_or_create_current_node()
         
         # Incrementally update ranking one question at a time.
         unranked_answers = self.answers.filter(ranked=False, question__isnull=False)
@@ -608,11 +754,12 @@ class Session(models.Model):
             first = self.answers.count() == 1
             if first:
                 # Ensure all prior rankings for this session are deleted.
-                self.rankings.all().delete()
+                #self.rankings.all().delete()
                 # For the first interation, insert the initial ranking records.
                 sql = """
-INSERT INTO asklet_ranking (session_id, target_id, ranking)
-SELECT  a.session_id,
+INSERT INTO asklet_ranking (node_id, target_id, ranking)
+SELECT  {node_id} AS node_id,
+        --a.session_id,
         t.id,
         SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) AS ranking
 FROM    asklet_target AS t
@@ -632,6 +779,7 @@ WHERE   t.domain_id = {domain_id}
 GROUP BY a.session_id, t.id
 HAVING SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) > {drop_threshold};
                 """.format(
+                    node_id=current_node.id,
                     session_id=self.id,
                     domain_id=self.domain.id,
                     question_id=unranked_answer.question.id,
@@ -643,7 +791,7 @@ HAVING SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) > {dr
                 # For subsequent iterations, update the existing records.
                 if 'sqlite' in settings.DATABASES['default']['ENGINE']:
                     sql = """
-SELECT  a.session_id,
+SELECT  {node_id} AS node_id,
         t.id AS target_id,
         SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) AS ranking
 FROM    asklet_target AS t
@@ -661,6 +809,7 @@ WHERE   t.domain_id = {domain_id}
     AND t.sense IS NOT NULL
 GROUP BY a.session_id, t.id
                     """.format(
+                        node_id=current_node.id,
                         session_id=self.id,
                         domain_id=self.domain.id,
                         question_id=unranked_answer.question.id,
@@ -1063,22 +1212,78 @@ LIMIT 1;
             
         self.merged = True
         
+        self.domain.refresh_tree(verbose=verbose)
 #        commit()
+
+class RankingNode(models.Model):
+    """
+    Caches a question-answer step in the discrimination tree.
+    """
+    
+    domain = models.ForeignKey(
+        'Domain',
+        related_name='ranking_nodes',
+        blank=False,
+        null=False)
+    
+    parent = models.ForeignKey(
+        'self',
+        related_name='children',
+        blank=True,
+        null=True)
+    
+    question = models.ForeignKey(
+        'Question',
+        related_name='ranking_nodes',
+        blank=False,
+        null=False)
+    
+    answer = models.IntegerField(
+        choices=c.ANSWER_CHOICES,
+        blank=True,
+        null=True)
+
+    created = models.DateTimeField(
+        auto_now_add=True,
+        editable=False)
+    
+    updated = models.DateTimeField(
+        auto_now=True,
+        db_index=True,
+        editable=False)
+    
+    fresh = models.BooleanField(
+        default=False,
+        db_index=True)
+    
+    class Meta:
+        unique_together = (
+            ('domain', 'parent', 'question', 'answer'),
+        )
 
 class Ranking(models.Model):
     """
-    Caches target rankings for each session.
+    Caches target rankings for each node.
     """
     
-    session = models.ForeignKey('Session', related_name='rankings')
+    node = models.ForeignKey('RankingNode', related_name='rankings')
     
     target = models.ForeignKey('Target', related_name='rankings')
     
     ranking = models.FloatField(db_index=True)
     
+    created = models.DateTimeField(
+        auto_now_add=True,
+        editable=False)
+    
+    updated = models.DateTimeField(
+        auto_now=True,
+        db_index=True,
+        editable=False)
+    
     class Meta:
         unique_together = (
-            ('session', 'target'),
+            ('node', 'target'),
         )
         ordering = (
             '-ranking',
@@ -1459,6 +1664,14 @@ class Question(models.Model):
         verbose_name=_('object'),
         help_text=_('The URI of the object.'))
     
+    object = models.ForeignKey(
+        Target,
+        blank=True,
+        null=True,
+        editable=False,
+        related_name='questions',
+        help_text=_('The equivalent target for the conceptnet_object.'))
+        
     language = models.CharField(
         max_length=2,
         blank=True,
@@ -1577,6 +1790,14 @@ class Question(models.Model):
             
         if self.slug and self.slug_parts is None:
             self.slug_parts = self.slug.count('/')
+        
+        if self.conceptnet_object and not self.object:
+            try:
+                self.object = Target.objects.get(
+                    domain=self.domain,
+                    slug=self.conceptnet_object)
+            except Target.DoesNotExist:
+                pass
         
         if self.total_weights is None:
             self.total_weights = self.weights.all().count()

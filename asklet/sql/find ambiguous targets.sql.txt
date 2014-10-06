@@ -23,7 +23,7 @@ limit 1000
 
 --select * from asklet_target where word like '%reddit%'
 
-
+/*
 --how many ambiguous targets with no unambiguous targets have dbpedia gloss?
 select 
 --count(distinct ta.id)
@@ -39,3 +39,43 @@ and ta.total_weights_uaq = 0
 and ta.total_weights_aq >= 1
 order by ta.total_weights_aq desc
 limit 1000
+*/
+/*
+--how many ambiguous targets have exactly one associated unambiguous target
+--these can potentially have all weights copied over
+--47k
+select count(t.*)
+from asklet_target as t
+where t.sense is null
+and t.total_senses is not null
+and t.total_senses = 1
+
+--how many ambiguous targets have zero associated unambiguous targets
+--thise can potentially have unambiguous versions auto-generated and their weights copied over
+--1,558,602
+select count(t.*)
+from asklet_target as t
+where t.sense is null
+and t.total_senses is not null
+and t.total_senses = 0
+*/
+
+--how many weights with ambiguous target and question are linked to targets with one sense or less
+--these can potentially be auto-converted to fully umambiguous weights
+--2,251,968
+--runs in 200sec
+select --count(*)
+t1.slug, t1.total_senses, t1.total_weights, q.slug, t2.total_senses, t2.total_weights
+from asklet_targetquestionweight as w
+inner join asklet_target as t1 on t1.id = w.target_id
+	and t1.sense is null
+	and t1.total_senses <= 1
+inner join asklet_question as q on q.id = w.question_id
+inner join asklet_target as t2 on 
+	    t2.word = q.word
+	and t2.language = q.language
+	and t2.pos is null
+	and t2.sense is null
+	and t2.total_senses <= 1
+order by t1.total_weights desc
+limit 100

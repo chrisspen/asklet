@@ -81,12 +81,13 @@ def refresh(stripe_num=0, stripe_mod=0, options={}):
         print
             
         questions = domain.questions.filter(
-            Q(slug_parts__isnull=True)|\
-            Q(language__isnull=True)|\
-            Q(word__isnull=True)|\
+            Q(conceptnet_object__isnull=False, slug_parts__isnull=True)|\
+            Q(conceptnet_object__isnull=False, language__isnull=True)|\
+            Q(conceptnet_object__isnull=False, word__isnull=True)|\
+            Q(conceptnet_object__isnull=False, object__isnull=True)|\
             Q(total_weights__isnull=True)|\
-            Q(pos__isnull=True, slug_parts__gt=5)|\
-            Q(sense__isnull=True, slug_parts__gt=6))
+            Q(conceptnet_object__isnull=False, pos__isnull=True, slug_parts__gt=5)|\
+            Q(conceptnet_object__isnull=False, sense__isnull=True, slug_parts__gt=6))
         if stripe_mod:
             questions = questions.extra(where=['((asklet_question.id %%%% %i) = %i)' % (stripe_mod, stripe_num)])
         total = questions.count()

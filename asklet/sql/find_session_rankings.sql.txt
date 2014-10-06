@@ -2,10 +2,11 @@
 --count(*) as rankings,count(case when r.ranking <= -4 then 1 else null end) as bad_rankings
 r.target_id
 ,t.slug
+,r.ranking
 from asklet_session as s
 inner join asklet_ranking as r on r.session_id=s.id
 inner join asklet_target as t on t.id = r.target_id
-where s.user_uuid = 'e123874e89fe43aab505f28c151377dc'
+where s.user_uuid = 'dbfa70eddd854912b4f8968877255ec5'
 --group by s.id
 order by r.ranking desc
 limit 100
@@ -16,6 +17,6 @@ count(*) as rankings,count(case when r.ranking <= -4 then 1 else null end) as ba
 from asklet_session as s
 inner join asklet_ranking as r on r.session_id=s.id
 inner join asklet_target as t on t.id = r.target_id
-where s.user_uuid = 'e123874e89fe43aab505f28c151377dc'
+where s.user_uuid = 'dbfa70eddd854912b4f8968877255ec5'
 group by s.id
 */

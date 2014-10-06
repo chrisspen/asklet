@@ -466,4 +466,41 @@ class Tests(TestCase):
 #        history = domain.accuracy_history()
 #        print('open-world-assumption history:',history)
 #        self.assertEqual(history[-1], 1.0)
+
+    def test_tree_indexing(self):
+        
+        settings.ASKLET_RANKER = c.SQL
+        matrix_fn = 'asklet/tests/fixtures/matrix.yaml'
+        max_sessions = 150
+        domain_name = 'test'
+        
+        # Train the domain on a matrix.
+        domains = models.Domain.objects.all()
+        self.assertEqual(domains.count(), 1)
+        domain = models.Domain.objects.get(slug=domain_name)
+        domain.use_tree_indexing = True
+        domain.assumption = c.OPEN
+        domain.save()
+        random.seed(0)
+        call_command(
+            'asklet_simulate',
+            max_sessions=max_sessions,
+            domain=domain_name,
+            matrix=matrix_fn,
+            verbose=0,#enable for debugging messages
+            seed=0)
+        
+        # Test the domain against itself. It should have 100% accuracy.
+#        domain.sessions.all().delete()
+#        random.seed(0)
+#        call_command(
+#            'asklet_simulate',
+#            max_sessions=50,
+#            domain=domain_name,
+#            verbose=0,#enable for debugging messages
+#            seed=0)
 #        
+#        domain = models.Domain.objects.get(slug=domain_name)
+#        history = domain.accuracy_history()
+#        #print('history:',history)
+#        self.assertEqual(history[-1], 1.0)
