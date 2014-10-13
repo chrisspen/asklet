@@ -164,7 +164,24 @@ class Domain(models.Model):
     @property
     def usable_questions(self):
         return self.questions.filter(enabled=True, sense__isnull=False)
-        
+    
+    def load_yaml_matrix(self, fn, verbose=False):
+        """
+        Generates targets, questions and weights from a YAML test matrix.
+        """
+        from .utils import MatrixUser
+        user = MatrixUser(fn=fn)
+        for target_slug in user.data:
+            for question_slug, weight in user.data[target_slug].iteritems():
+                predicate_slug, object_slug = question_slug.split(',')
+                print('Creating weight:', target_slug, predicate_slug, object_slug, weight)
+                tqw = self.create_weight(target_slug, predicate_slug, object_slug)
+                tqw.vote(value=weight)
+                tqw.target.enabled = True
+                tqw.target.save()
+                tqw.question.enabled = True
+                tqw.question.save()
+    
     def create_target(self, slug):
         t, _ = Target.objects.get_or_create(
             domain=self,
@@ -187,7 +204,118 @@ class Domain(models.Model):
         tq, _ = TargetQuestionWeight.objects.get_or_create(
             target=t, question=q)
         return tq
-    
+        
+    def rank_questions(self, session=None, verbose=True, limit=1):
+        """
+        Uses SQL to finds the next best question given current answers.
+        """
+        exclude_question_ids = []
+        session_id = 0
+        if session:
+            exclude_question_ids = session.previously_asked_question_ids
+            session_id = session.id
+        
+        usable_targets = self.usable_targets.only('id')
+        
+        domain_id = self.id
+        ranking_str = ''
+        
+        #TODO:fix? actually slows down the query?
+#        if self.rankings.all().exists():
+#            # Restrict question analysis to those linked to actively ranked targets.
+#            # Note, we only add this condition if there is at least one ranking.
+#            # Otherwise, we won't get any questions for the first iteration.
+#            #ranking_str = 'AND r.id IS NOT NULL'
+#            ranking_str = '''AND tqw.target_id IN (
+#    SELECT target_id
+#    FROM asklet_ranking
+#    WHERE session_id = {session_id}
+#)'''.format(session_id=session_id)
+#            usable_targets = usable_targets.filter(
+#                rankings__session=self)
+
+#    LEFT OUTER JOIN
+#            asklet_ranking AS r ON
+#            r.session_id = {session_id}
+#        AND r.target_id = tqw.target_id
+
+        total_target_count = usable_targets.count()
+        
+        exclude_question_ids_str = ''
+        if exclude_question_ids:
+            exclude_question_ids_str = 'AND q.id NOT IN (' + (','.join(map(str, exclude_question_ids))) + ')'
+        
+#        print('%i enabled questions' % self.questions.filter(enabled=True).count())
+#        print('%i question weights' % TargetQuestionWeight.objects.filter(question__domain=self).count())
+        
+        # We add the tangible weight sum to the implied sum of missing weights.
+        # e.g. If we have 1000 targets but only 100 have weights for
+        # a question, then 900 have an implicit weight as defined by
+        # the domain's world assumption.
+        cursor = connection.cursor()
+        sql = """
+SELECT  m.*
+        --,-((m.up_count/m.target_count)*log(m.up_count/m.target_count) + (m.down_count/m.target_count)*log(m.down_count/m.target_count)) AS entropy
+FROM (
+SELECT  m.question_id,--m.slug,
+        ABS(m.weight_sum + (({total_target_count} - m.target_count)*{missing_weight})) AS weight_sum_abs,
+        --m.up_count,
+        --m.down_count + case when {missing_weight} < 0 then {total_target_count}-m.up_count else 0 end AS down_count,
+        m.weight_sum,
+        m.target_count
+FROM (
+    -- Aggregate question_id -> sum(nweight)
+    SELECT  q.id AS question_id,q.slug,
+            SUM(COALESCE(a.answer, tqw.nweight)) AS weight_sum,
+            SUM(CASE WHEN COALESCE(a.answer, tqw.nweight, -4) > 0  THEN 1 ELSE 0 END) AS up_count,
+            SUM(CASE WHEN COALESCE(a.answer, tqw.nweight, -4) <= 0 THEN 1 ELSE 0 END) AS down_count,
+            COUNT(DISTINCT tqw.target_id) AS target_count
+    FROM    asklet_question AS q
+    LEFT OUTER JOIN
+            asklet_targetquestionweight AS tqw ON
+            tqw.question_id = q.id
+        AND tqw.weight IS NOT NULL
+    LEFT OUTER JOIN
+            asklet_answer AS a ON
+            a.session_id = {session_id}
+        AND a.question_id = tqw.question_id
+    WHERE   q.enabled = CAST(1 AS bool)
+        AND q.sense IS NOT NULL
+        AND q.domain_id = {domain_id}
+        {exclude_question_ids_str}
+        {ranking_str}
+    GROUP BY q.id
+) AS m
+) AS m
+WHERE m.weight_sum IS NOT NULL
+ORDER BY weight_sum_abs ASC
+--ORDER BY entropy DESC
+LIMIT {limit};
+        """.format(
+            domain_id=domain_id,
+            session_id=session_id,
+            total_target_count=total_target_count,
+            missing_weight=self.assumption_weight,
+            exclude_question_ids_str=exclude_question_ids_str,
+            ranking_str=ranking_str,
+            limit=limit,
+#            sub_sql=sub_sql,
+        )
+        if verbose: print('question sql:',sql)
+        cursor.execute(sql)
+        #results = []
+        question_rankings = defaultdict(int) # {question:rank}
+        for question_id, weight_sum_abs, weight_sum, target_count in cursor:
+#            print('row:',question_id, weight_sum_abs, weight_sum, target_count, total_count)
+            #results.append((question_id, weight_sum_abs))
+            question = Question.objects.get(id=question_id)
+            question_rankings[question] = weight_sum_abs
+
+        #TODO:rank questions by finding the one with the most even YES/NO split, explained in 0053
+        # Lower rank means better splitting criteria.
+        question_rankings = sorted(question_rankings.items(), key=lambda o: abs(o[1]))
+        return question_rankings
+
     @atomic
     def refresh_tree(self, verbose=False, **kwargs):
         """
@@ -195,6 +323,13 @@ class Domain(models.Model):
         """
         if not self.use_tree_indexing:
             return
+        
+        questions = self.rank_questions(verbose=verbose, limit=1)
+        print('questions:',questions)
+        
+        #TODO
+        
+        return
         
         queue = [None] # [parent node]
         while queue:
@@ -717,298 +852,186 @@ class Session(models.Model):
             )
             parent = node
         return node
-    
-    @atomic
-    def update_target_rankings(self, verbose=0):
-        """
-        Recalculates the target ranking records given the currently
-        answered questions.
-        """
-        
-        drop_threshold = -4#works!
-        #drop_threshold = 0
-        
-        #=>1.0 old rank fixed
-        #=>0.0 new rank overrides everything
-        #=>0.5 old rank cut in half
-        ranking_weight = 0.1
-        ranking_weight_inv = 1-ranking_weight
-        
-        # Delete rankings of failed target guesses?
-        incorrect_targets = self.incorrect_targets
-#        if incorrect_targets:
-#            expired_rankings = self.rankings.filter(target__in=incorrect_targets)
+#    
+#    @atomic
+#    def update_target_rankings(self, verbose=0):
+#        """
+#        Recalculates the target ranking records given the currently
+#        answered questions.
+#        """
+#        
+#        drop_threshold = -4#works!
+#        #drop_threshold = 0
+#        
+#        #=>1.0 old rank fixed
+#        #=>0.0 new rank overrides everything
+#        #=>0.5 old rank cut in half
+#        ranking_weight = 0.1
+#        ranking_weight_inv = 1-ranking_weight
+#        
+#        # Delete rankings of failed target guesses?
+#        incorrect_targets = self.incorrect_targets
+##        if incorrect_targets:
+##            expired_rankings = self.rankings.filter(target__in=incorrect_targets)
+##            if verbose:
+##                print('%i expired_rankings' % expired_rankings.count())
+##            expired_rankings.delete()
+#        exclude_target_ids = [0] + list(incorrect_targets.values_list('id', flat=True))
+#        exclude_target_id_str = ','.join(map(str, exclude_target_ids))
+#        
+#        #parent_node_id = self.node.id if self.node else 'null'
+#        current_node = self.node = self.get_or_create_current_node()
+#        
+#        # Incrementally update ranking one question at a time.
+#        unranked_answers = self.answers.filter(ranked=False, question__isnull=False)
+#        for unranked_answer in unranked_answers.iterator():
+#            manually_update = False
+#            first = self.answers.count() == 1
+#            if first:
+#                # Ensure all prior rankings for this session are deleted.
+#                #self.rankings.all().delete()
+#                # For the first interation, insert the initial ranking records.
+#                sql = """
+#INSERT INTO asklet_ranking (node_id, target_id, ranking)
+#SELECT  {node_id} AS node_id,
+#        --a.session_id,
+#        t.id,
+#        SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) AS ranking
+#FROM    asklet_target AS t
+#INNER JOIN asklet_answer AS a on
+#        a.session_id = {session_id}
+#    AND a.guess_id IS NULL
+#    AND a.question_id = {question_id}
+#INNER JOIN asklet_question AS q on
+#        q.id = a.question_id
+#LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
+#        tqw.question_id = a.question_id
+#    AND tqw.target_id = t.id
+#WHERE   t.domain_id = {domain_id}
+#    AND t.enabled = CAST(1 AS bool)
+#    AND t.sense IS NOT NULL
+#    AND t.id NOT IN ({exclude_target_ids})
+#GROUP BY a.session_id, t.id
+#HAVING SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) > {drop_threshold};
+#                """.format(
+#                    node_id=current_node.id,
+#                    session_id=self.id,
+#                    domain_id=self.domain.id,
+#                    question_id=unranked_answer.question.id,
+#                    assumption_weight=self.domain.assumption_weight,
+#                    exclude_target_ids=exclude_target_id_str,
+#                    drop_threshold=drop_threshold,
+#                )
+#            else:
+#                # For subsequent iterations, update the existing records.
+#                if 'sqlite' in settings.DATABASES['default']['ENGINE']:
+#                    sql = """
+#SELECT  {node_id} AS node_id,
+#        t.id AS target_id,
+#        SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) AS ranking
+#FROM    asklet_target AS t
+#INNER JOIN asklet_answer AS a on
+#        a.session_id = {session_id}
+#    AND a.guess_id IS NULL
+#    AND a.question_id = {question_id}
+#INNER JOIN asklet_question AS q on
+#        q.id = a.question_id
+#LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
+#        tqw.question_id = a.question_id
+#    AND tqw.target_id = t.id
+#WHERE   t.domain_id = {domain_id}
+#    AND t.enabled = CAST(1 AS bool)
+#    AND t.sense IS NOT NULL
+#GROUP BY a.session_id, t.id
+#                    """.format(
+#                        node_id=current_node.id,
+#                        session_id=self.id,
+#                        domain_id=self.domain.id,
+#                        question_id=unranked_answer.question.id,
+#                        assumption_weight=self.domain.assumption_weight,
+#                    )
+#                    manually_update = True
+#                else:
+#                    sql = """
+#UPDATE asklet_ranking AS r
+#SET ranking = r.ranking*{ranking_weight} + s.ranking*{ranking_weight_inv}
+#FROM (
+#    SELECT  a.session_id,
+#            t.target_id,
+#            SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) AS ranking
+#    FROM    asklet_ranking AS t
+#    INNER JOIN asklet_answer AS a on
+#            a.session_id = {session_id}
+#        AND a.guess_id IS NULL
+#        AND a.question_id = {question_id}
+#    INNER JOIN asklet_question AS q on
+#            q.id = a.question_id
+#    LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
+#            tqw.question_id = a.question_id
+#        AND tqw.target_id = t.target_id
+#    GROUP BY a.session_id, t.target_id
+#) AS s
+#WHERE   r.target_id = s.target_id
+#    AND r.session_id = s.session_id;
+#                    """.format(
+#                        session_id=self.id,
+#                        domain_id=self.domain.id,
+#                        question_id=unranked_answer.question.id,
+#                        assumption_weight=self.domain.assumption_weight,
+#                        ranking_weight=ranking_weight,
+#                        ranking_weight_inv=ranking_weight_inv,
+#                    )
 #            if verbose:
-#                print('%i expired_rankings' % expired_rankings.count())
-#            expired_rankings.delete()
-        exclude_target_ids = [0] + list(incorrect_targets.values_list('id', flat=True))
-        exclude_target_id_str = ','.join(map(str, exclude_target_ids))
-        
-        #parent_node_id = self.node.id if self.node else 'null'
-        current_node = self.node = self.get_or_create_current_node()
-        
-        # Incrementally update ranking one question at a time.
-        unranked_answers = self.answers.filter(ranked=False, question__isnull=False)
-        for unranked_answer in unranked_answers.iterator():
-            manually_update = False
-            first = self.answers.count() == 1
-            if first:
-                # Ensure all prior rankings for this session are deleted.
-                #self.rankings.all().delete()
-                # For the first interation, insert the initial ranking records.
-                sql = """
-INSERT INTO asklet_ranking (node_id, target_id, ranking)
-SELECT  {node_id} AS node_id,
-        --a.session_id,
-        t.id,
-        SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) AS ranking
-FROM    asklet_target AS t
-INNER JOIN asklet_answer AS a on
-        a.session_id = {session_id}
-    AND a.guess_id IS NULL
-    AND a.question_id = {question_id}
-INNER JOIN asklet_question AS q on
-        q.id = a.question_id
-LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
-        tqw.question_id = a.question_id
-    AND tqw.target_id = t.id
-WHERE   t.domain_id = {domain_id}
-    AND t.enabled = CAST(1 AS bool)
-    AND t.sense IS NOT NULL
-    AND t.id NOT IN ({exclude_target_ids})
-GROUP BY a.session_id, t.id
-HAVING SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) > {drop_threshold};
-                """.format(
-                    node_id=current_node.id,
-                    session_id=self.id,
-                    domain_id=self.domain.id,
-                    question_id=unranked_answer.question.id,
-                    assumption_weight=self.domain.assumption_weight,
-                    exclude_target_ids=exclude_target_id_str,
-                    drop_threshold=drop_threshold,
-                )
-            else:
-                # For subsequent iterations, update the existing records.
-                if 'sqlite' in settings.DATABASES['default']['ENGINE']:
-                    sql = """
-SELECT  {node_id} AS node_id,
-        t.id AS target_id,
-        SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) AS ranking
-FROM    asklet_target AS t
-INNER JOIN asklet_answer AS a on
-        a.session_id = {session_id}
-    AND a.guess_id IS NULL
-    AND a.question_id = {question_id}
-INNER JOIN asklet_question AS q on
-        q.id = a.question_id
-LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
-        tqw.question_id = a.question_id
-    AND tqw.target_id = t.id
-WHERE   t.domain_id = {domain_id}
-    AND t.enabled = CAST(1 AS bool)
-    AND t.sense IS NOT NULL
-GROUP BY a.session_id, t.id
-                    """.format(
-                        node_id=current_node.id,
-                        session_id=self.id,
-                        domain_id=self.domain.id,
-                        question_id=unranked_answer.question.id,
-                        assumption_weight=self.domain.assumption_weight,
-                    )
-                    manually_update = True
-                else:
-                    sql = """
-UPDATE asklet_ranking AS r
-SET ranking = r.ranking*{ranking_weight} + s.ranking*{ranking_weight_inv}
-FROM (
-    SELECT  a.session_id,
-            t.target_id,
-            SUM(4 - ABS(a.answer - COALESCE(tqw.nweight, {assumption_weight}))) AS ranking
-    FROM    asklet_ranking AS t
-    INNER JOIN asklet_answer AS a on
-            a.session_id = {session_id}
-        AND a.guess_id IS NULL
-        AND a.question_id = {question_id}
-    INNER JOIN asklet_question AS q on
-            q.id = a.question_id
-    LEFT OUTER JOIN asklet_targetquestionweight AS tqw ON
-            tqw.question_id = a.question_id
-        AND tqw.target_id = t.target_id
-    GROUP BY a.session_id, t.target_id
-) AS s
-WHERE   r.target_id = s.target_id
-    AND r.session_id = s.session_id;
-                    """.format(
-                        session_id=self.id,
-                        domain_id=self.domain.id,
-                        question_id=unranked_answer.question.id,
-                        assumption_weight=self.domain.assumption_weight,
-                        ranking_weight=ranking_weight,
-                        ranking_weight_inv=ranking_weight_inv,
-                    )
-            if verbose:
-                print('~'*80)
-                print('update_target_rankings sql:\n',sql)
-                #raw_input('enter')#TODO:remove
-            cursor = connection.cursor()
-            cursor.execute(sql)
-            
-            # Only necessary for Sqlite3 used during unittesting...
-            if manually_update:
-                for session_id, target_id, ranking in cursor:
-                    #print(session_id, target_id, ranking)
-                    r, _ = Ranking.objects.get_or_create(
-                        session_id=session_id,
-                        target_id=target_id,
-                        defaults=dict(ranking=0))
-                    old_ranking = r.ranking
-                    #r.ranking += ranking
-                    r.ranking = r.ranking*ranking_weight + ranking*ranking_weight_inv
-                    r.save()
-                    if verbose:
-                        print('sqlite3.ranking.updated %s: %s->%s' % (r.target, old_ranking, r.ranking))
-            
-            # Mark answer as ranked.
-            unranked_answer.ranked = True
-            unranked_answer.save()
-            
-            # Delete the lowest N rankings to speed up the eventual
-            # question-ranking.
-            #TODO:paramaterize count and ratio threshold?
-            # lower, the longer the search takes but more certain
-            # higher, the faster the search but more likely to error
-            if 1:#rankings_count > 3:#10:
-                #rankings_count = self.rankings.all().count()
-                #low_rankings = self.rankings.all().order_by('-ranking')[int(rankings_count*0.75):]
-                #Ranking.objects.filter(id__in=low_rankings.values_list('id', flat=True))
-                low_rankings = self.rankings.filter(ranking__lt=drop_threshold)
-#                low_rankings_count = low_rankings.count()
-#                if low_rankings_count:
-#                    print('deleting %i low rankings' % low_rankings_count)
-                low_rankings.delete()
-            
-            if verbose:
-                print('final rankings:',self.rankings.all().count())
-            
-            #commit()#unnecessary with atomic()
-    
-    def _query_questionrankings(self, exclude_question_ids=[], verbose=0):
-        """
-        Uses SQL to finds the next best question given current answers.
-        """
-        
-        usable_targets = self.domain.usable_targets.only('id')
-        
-        session = self
-        session_id = self.id
-        ranking_str = ''
-        
-        #TODO:fix? actually slows down the query?
-        if self.rankings.all().exists():
-            # Restrict question analysis to those linked to actively ranked targets.
-            # Note, we only add this condition if there is at least one ranking.
-            # Otherwise, we won't get any questions for the first iteration.
-            #ranking_str = 'AND r.id IS NOT NULL'
-            ranking_str = '''AND tqw.target_id IN (
-    SELECT target_id
-    FROM asklet_ranking
-    WHERE session_id = {session_id}
-)'''.format(session_id=session_id)
-            usable_targets = usable_targets.filter(
-                rankings__session=self)
+#                print('~'*80)
+#                print('update_target_rankings sql:\n',sql)
+#                #raw_input('enter')#TODO:remove
+#            cursor = connection.cursor()
+#            cursor.execute(sql)
+#            
+#            # Only necessary for Sqlite3 used during unittesting...
+#            if manually_update:
+#                for session_id, target_id, ranking in cursor:
+#                    #print(session_id, target_id, ranking)
+#                    r, _ = Ranking.objects.get_or_create(
+#                        session_id=session_id,
+#                        target_id=target_id,
+#                        defaults=dict(ranking=0))
+#                    old_ranking = r.ranking
+#                    #r.ranking += ranking
+#                    r.ranking = r.ranking*ranking_weight + ranking*ranking_weight_inv
+#                    r.save()
+#                    if verbose:
+#                        print('sqlite3.ranking.updated %s: %s->%s' % (r.target, old_ranking, r.ranking))
+#            
+#            # Mark answer as ranked.
+#            unranked_answer.ranked = True
+#            unranked_answer.save()
+#            
+#            # Delete the lowest N rankings to speed up the eventual
+#            # question-ranking.
+#            #TODO:paramaterize count and ratio threshold?
+#            # lower, the longer the search takes but more certain
+#            # higher, the faster the search but more likely to error
+#            if 1:#rankings_count > 3:#10:
+#                #rankings_count = self.rankings.all().count()
+#                #low_rankings = self.rankings.all().order_by('-ranking')[int(rankings_count*0.75):]
+#                #Ranking.objects.filter(id__in=low_rankings.values_list('id', flat=True))
+#                low_rankings = self.rankings.filter(ranking__lt=drop_threshold)
+##                low_rankings_count = low_rankings.count()
+##                if low_rankings_count:
+##                    print('deleting %i low rankings' % low_rankings_count)
+#                low_rankings.delete()
+#            
+#            if verbose:
+#                print('final rankings:',self.rankings.all().count())
+#            
+#            #commit()#unnecessary with atomic()
 
-#    LEFT OUTER JOIN
-#            asklet_ranking AS r ON
-#            r.session_id = {session_id}
-#        AND r.target_id = tqw.target_id
-
-        total_target_count = usable_targets.count()
-        
-        exclude_question_ids_str = ''
-        if exclude_question_ids:
-            exclude_question_ids_str = 'AND q.id NOT IN (' + (','.join(map(str, exclude_question_ids))) + ')'
-        
-#        print('%i enabled questions' % self.questions.filter(enabled=True).count())
-#        print('%i question weights' % TargetQuestionWeight.objects.filter(question__domain=self).count())
-        
-        # We add the tangible weight sum to the implied sum of missing weights.
-        # e.g. If we have 1000 targets but only 100 have weights for
-        # a question, then 900 have an implicit weight as defined by
-        # the domain's world assumption.
-        cursor = connection.cursor()
-        sql = """
-SELECT  m.*
-        --,-((m.up_count/m.target_count)*log(m.up_count/m.target_count) + (m.down_count/m.target_count)*log(m.down_count/m.target_count)) AS entropy
-FROM (
-SELECT  m.question_id,--m.slug,
-        ABS(m.weight_sum + (({total_target_count} - m.target_count)*{missing_weight})) AS weight_sum_abs,
-        --m.up_count,
-        --m.down_count + case when {missing_weight} < 0 then {total_target_count}-m.up_count else 0 end AS down_count,
-        m.weight_sum,
-        m.target_count
-FROM (
-    -- Aggregate question_id -> sum(nweight)
-    SELECT  q.id AS question_id,q.slug,
-            SUM(COALESCE(a.answer, tqw.nweight)) AS weight_sum,
-            SUM(CASE WHEN COALESCE(a.answer, tqw.nweight, -4) > 0  THEN 1 ELSE 0 END) AS up_count,
-            SUM(CASE WHEN COALESCE(a.answer, tqw.nweight, -4) <= 0 THEN 1 ELSE 0 END) AS down_count,
-            COUNT(DISTINCT tqw.target_id) AS target_count
-    FROM    asklet_question AS q
-    LEFT OUTER JOIN
-            asklet_targetquestionweight AS tqw ON
-            tqw.question_id = q.id
-        AND tqw.weight IS NOT NULL
-    LEFT OUTER JOIN
-            asklet_answer AS a ON
-            a.session_id = {session_id}
-        AND a.question_id = tqw.question_id
-    WHERE   q.enabled = CAST(1 AS bool)
-        AND q.sense IS NOT NULL
-        AND q.domain_id = {domain_id}
-        {exclude_question_ids_str}
-        {ranking_str}
-    GROUP BY q.id
-) AS m
-) AS m
-WHERE m.weight_sum IS NOT NULL
-ORDER BY weight_sum_abs ASC
---ORDER BY entropy DESC
-LIMIT 1;
-        """.format(
-            domain_id=self.domain.id,
-            session_id=session_id,
-            total_target_count=total_target_count,
-            missing_weight=self.domain.assumption_weight,
-            exclude_question_ids_str=exclude_question_ids_str,
-            ranking_str=ranking_str,
-#            sub_sql=sub_sql,
-        )
-        if verbose: print('question sql:',sql)
-        cursor.execute(sql)
-        results = []
-        for question_id, weight_sum_abs, weight_sum, target_count in cursor:
-#            print('row:',question_id, weight_sum_abs, weight_sum, target_count, total_count)
-            results.append((question_id, weight_sum_abs))
-        return results
-    
-    def rank_questions_sql(self, verbose=True):
-        results = self._query_questionrankings(
-            exclude_question_ids=self.previously_asked_question_ids,
-            verbose=verbose)
-        question_rankings = defaultdict(int) # {question:rank}
-#        print('results:',results)
-        for question_id, rank in results:
-            question = Question.objects.get(id=question_id)
-            question_rankings[question] = rank
-
-        #TODO:rank questions by finding the one with the most even YES/NO split, explained in 0053
-        # Lower rank means better splitting criteria.
-        question_rankings = sorted(question_rankings.items(), key=lambda o: abs(o[1]))
-        return question_rankings
-
-    def rank_questions(self, *args, **kwargs):
-        ranker = settings.ASKLET_RANKER.lower()
-        return getattr(self, 'rank_questions_%s' % ranker)(*args, **kwargs)
+    def rank_questions(self, verbose=True, limit=1):
+        return self.domain.rank_questions(
+            session=session,
+            verbose=verbose,
+            limit=limit)
 
     def get_next_question(self, verbose=0):
         """
@@ -1017,7 +1040,7 @@ LIMIT 1;
         if not self.winner is None:
             return
         
-        self.update_target_rankings(verbose=verbose)
+        #self.update_target_rankings(verbose=verbose)
         
         answers = self.answers.all()
         prior_failed_target_ids = set(self.incorrect_targets.values_list('id', flat=True))

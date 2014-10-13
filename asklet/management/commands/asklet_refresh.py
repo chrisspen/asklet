@@ -28,7 +28,7 @@ def refresh(stripe_num=0, stripe_mod=0, options={}):
     connection.close()
     dryrun = options['dryrun']
     q = models.Domain.objects.all()
-    domain_id = options['domain']
+    domain_id = str(options['domain'])
     if domain_id:
         if domain_id.isdigit():
             q = q.filter(id=int(domain_id))
@@ -129,6 +129,7 @@ class Command(BaseCommand):
     option_list = BaseCommand.option_list + (
         make_option('--domain', default=''),
         make_option('--dryrun', action='store_true', default=False),
+        make_option('--jobs', default=None),
     )
     
     @commit_on_success
@@ -139,15 +140,18 @@ class Command(BaseCommand):
         try:
             
             print('Launching processes...')
-            stripe_mod = cpu_count()
-            connection.close()
-            Parallel(n_jobs=stripe_mod)(
-                delayed(refresh)(
-                    stripe_mod=stripe_mod,
-                    stripe_num=i,
-                    options=options,
-                )
-                for i in range(stripe_mod))
+            stripe_mod = options.get('jobs') or cpu_count()
+            if stripe_mod == 1:
+                refresh(options=options)
+            else:
+                connection.close()
+                Parallel(n_jobs=stripe_mod)(
+                    delayed(refresh)(
+                        stripe_mod=stripe_mod,
+                        stripe_num=i,
+                        options=options,
+                    )
+                    for i in range(stripe_mod))
                 
             print('\nDone.')
         

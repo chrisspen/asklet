@@ -482,13 +482,33 @@ class Tests(TestCase):
         domain.assumption = c.OPEN
         domain.save()
         random.seed(0)
+        
+        # Skip learning and load test data directly into the domain.
+        domain.load_yaml_matrix(fn=matrix_fn, verbose=True)
+        weights = domain.weights.all()
+        self.assertEqual(weights.count(), 432)
+        # All questions should have senses.
+        weights = domain.weights.filter(question__sense__isnull=True)
+        self.assertEqual(weights.count(), 0)
+        # All questions should be enabled.
+        weights = domain.weights.filter(question__enabled=False)
+        self.assertEqual(weights.count(), 0)
+        
         call_command(
-            'asklet_simulate',
-            max_sessions=max_sessions,
-            domain=domain_name,
-            matrix=matrix_fn,
-            verbose=0,#enable for debugging messages
-            seed=0)
+            'asklet_refresh',
+            domain=domain.id,
+            jobs=1,
+        )
+        
+        domain.refresh_tree(verbose=1)
+        
+#        call_command(
+#            'asklet_simulate',
+#            max_sessions=max_sessions,
+#            domain=domain_name,
+#            matrix=matrix_fn,
+#            verbose=0,#enable for debugging messages
+#            seed=0)
         
         # Test the domain against itself. It should have 100% accuracy.
 #        domain.sessions.all().delete()

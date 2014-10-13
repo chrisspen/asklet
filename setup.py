@@ -15,6 +15,7 @@ def get_reqs(testing=False):
         'ConceptNet',
         'django-admin-steroids>=0.2.14',
         #'django-picklefield>=0.3.1',
+        'joblib>=0.8.3',
     ]
     if testing:
         reqs.extend([

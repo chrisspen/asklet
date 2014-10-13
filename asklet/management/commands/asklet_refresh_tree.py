@@ -20,20 +20,6 @@ from six import u
 from asklet import constants as c
 from asklet import models
 
-def get_weight(subject, predicate, object):
-    
-    # Check for an explicit weight.
-    try:
-        return models.TargetQuestionWeight.objects.get(
-            target__slug=subject,
-            question__conceptnet_predicate=predicate,
-            question__conceptnet_object=object
-        )
-    except models.TargetQuestionWeight.DoesNotExist:
-        pass
-        
-    # Otherwise, attempt inference.
-
 class Command(BaseCommand):
     help = 'Refreshes the index tree of a domain.'
     args = ''
